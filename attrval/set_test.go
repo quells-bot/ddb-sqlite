@@ -37,3 +37,24 @@ func TestBinarySet(t *testing.T) {
 		t.Errorf("BS = %v, want [[1] [2] [3]]", got)
 	}
 }
+
+func TestNewNumberSetFromStrings(t *testing.T) {
+	v, err := NewNumberSetFromStrings([]string{"2", "1", "1.0"})
+	if err != nil {
+		t.Fatalf("NewNumberSetFromStrings: %v", err)
+	}
+	if v.Tag() != TagNumberSet {
+		t.Fatalf("tag = %v, want NumberSet", v.Tag())
+	}
+	// "1" and "1.0" collide; sorted numerically.
+	ns := v.NS()
+	if len(ns) != 2 || ns[0].String() != "1" || ns[1].String() != "2" {
+		t.Errorf("NS = %v, want [1 2]", ns)
+	}
+}
+
+func TestNewNumberSetFromStringsInvalid(t *testing.T) {
+	if _, err := NewNumberSetFromStrings([]string{"1", "notanumber"}); err == nil {
+		t.Error("invalid member should error")
+	}
+}

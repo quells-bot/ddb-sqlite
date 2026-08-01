@@ -2,6 +2,7 @@ package attrval
 
 import (
 	"bytes"
+	"fmt"
 	"sort"
 
 	"github.com/quells-bot/ddb-sqlite/internal/num"
@@ -82,6 +83,22 @@ func (v Value) SS() []string { return v.ss }
 // NS returns the NumberSet elements (deduped, sorted). Valid only when
 // Tag()==TagNumberSet.
 func (v Value) NS() []num.Decimal { return v.ns }
+
+// NewNumberSetFromStrings constructs a NumberSet from DynamoDB wire number
+// strings, parsing and validating each via num.Parse and deduplicating
+// numerically (so "1" and "1.0" collide). It is the string-based entry point
+// used by the adapter, which must not import internal/num.
+func NewNumberSetFromStrings(items []string) (Value, error) {
+	decs := make([]num.Decimal, 0, len(items))
+	for _, s := range items {
+		d, err := num.Parse(s)
+		if err != nil {
+			return Value{}, fmt.Errorf("attrval: bad number set member %q: %w", s, err)
+		}
+		decs = append(decs, d)
+	}
+	return NewNumberSet(decs), nil
+}
 
 // BS returns the BinarySet elements (deduped, sorted). Valid only when
 // Tag()==TagBinarySet.
