@@ -145,7 +145,7 @@ One lexer + parser produces an AST; one evaluator serves condition **and** filte
 - **Comparisons:** `= <> < > <= >=`, `BETWEEN`, `IN`. **Logical:** `AND OR NOT`, parentheses.
 - **Operands:** a document `name.path[2]`, a `:value` substitution, or `size(path)`.
 - **Type discipline (faithfulness):** comparisons require operand types to be comparable; mismatched types make a comparison evaluate **false** (not an error), matching DynamoDB. `=` across types is false, `<>` is true. Number comparisons use exact decimals.
-- **`size()` semantics:** String→UTF-8 byte length, Binary→byte count, Number→digit count per AWS spec, Set/List/Map→element count.
+- **`size()` semantics:** String→UTF-8 byte length, Binary→byte count, Set/List/Map→element count. Number and BOOL are **unsupported**: `size()` on them yields *missing*, so the enclosing comparison is false. (An earlier draft asserted "Number → digit count per AWS spec"; `dynamodb-local` returns `ConditionalCheckFailedException` for `size(n) = :n` at any digit count, so the digit-count claim was wrong and this line is the correction, see M2 expressions spec §4.3(1).)
 - **`contains` / `begins_with`:** substring/byte-prefix for String/Binary; membership for Set; element-equality for List.
 - **`attribute_exists` vs Null:** distinguishes *present* (including `Null`) from *missing* — the evaluator must honor this subtle DynamoDB distinction.
 

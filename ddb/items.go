@@ -2,6 +2,7 @@ package ddb
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,10 +15,26 @@ import (
 // Item is a DynamoDB item: a map of attribute names to typed values.
 type Item map[string]attrval.Value
 
-// PutItemInput carries the table name and item to insert/overwrite by key.
+// PutItemInput carries the table name and item to insert/overwrite by key,
+// plus the optional condition expression and ReturnValues mode.
 type PutItemInput struct {
 	TableName string
 	Item      Item
+
+	ConditionExpression       string
+	ExpressionAttributeNames  map[string]string
+	ExpressionAttributeValues map[string]attrval.Value
+
+	// ReturnValues accepts NONE (default) or ALL_OLD.
+	ReturnValues string
+	// ReturnValuesOnConditionCheckFailure accepts NONE (default) or ALL_OLD;
+	// ALL_OLD populates ConditionalCheckFailedError.Item.
+	ReturnValuesOnConditionCheckFailure string
+}
+
+// PutItemOutput carries the pre-write item when ReturnValues=ALL_OLD.
+type PutItemOutput struct {
+	Attributes Item
 }
 
 // maxItemBytes is the 400KB item-size proxy (JSON byte length). Full accounting
@@ -56,66 +73,126 @@ func keyValue(v attrval.Value) (any, error) {
 	}
 }
 
-func (c *Client) PutItem(ctx context.Context, in PutItemInput) error {
+func (c *Client) PutItem(ctx context.Context, in PutItemInput) (PutItemOutput, error) {
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
-		return err
+		return PutItemOutput{}, err
 	}
 	defer tx.Rollback()
 
 	def, err := c.store.GetTableDef(tx, in.TableName)
 	if errors.Is(err, storage.ErrNotFound) {
-		return fmt.Errorf("%w: table %q not found", ErrTableNotFound, in.TableName)
+		return PutItemOutput{}, fmt.Errorf("%w: table %q not found", ErrTableNotFound, in.TableName)
 	}
 	if err != nil {
-		return err
+		return PutItemOutput{}, err
 	}
 
 	// Validate the partition key attribute is present with the right type.
 	hv, ok := in.Item[def.Hash]
 	if !ok {
-		return fmt.Errorf("%w: item missing partition key %q", ErrValidation, def.Hash)
+		return PutItemOutput{}, fmt.Errorf("%w: item missing partition key %q", ErrValidation, def.Hash)
 	}
 	if hv.Tag() != tagForKeyType(def.HashType) {
-		return fmt.Errorf("%w: partition key %q type %s != declared %s", ErrValidation, def.Hash, hv.Type(), def.HashType)
+		return PutItemOutput{}, fmt.Errorf("%w: partition key %q type %s != declared %s", ErrValidation, def.Hash, hv.Type(), def.HashType)
 	}
-	var rv attrval.Value
+	var rvKey attrval.Value
 	if def.Range != "" {
-		rv, ok = in.Item[def.Range]
+		rvKey, ok = in.Item[def.Range]
 		if !ok {
-			return fmt.Errorf("%w: item missing sort key %q", ErrValidation, def.Range)
+			return PutItemOutput{}, fmt.Errorf("%w: item missing sort key %q", ErrValidation, def.Range)
 		}
-		if rv.Tag() != tagForKeyType(def.RangeType) {
-			return fmt.Errorf("%w: sort key %q type %s != declared %s", ErrValidation, def.Range, rv.Type(), def.RangeType)
+		if rvKey.Tag() != tagForKeyType(def.RangeType) {
+			return PutItemOutput{}, fmt.Errorf("%w: sort key %q type %s != declared %s", ErrValidation, def.Range, rvKey.Type(), def.RangeType)
 		}
 	}
+
+	// Expressions are validated only after the table and key, because that is
+	// the order DynamoDB reports failures in: a request naming a missing table
+	// gets ResourceNotFoundException even when its expression is also
+	// malformed. Parsing still happens before the row read, so a bad
+	// expression fails whether or not the item exists.
+	rv, err := validateReturnValuesOldOnly(in.ReturnValues)
+	if err != nil {
+		return PutItemOutput{}, err
+	}
+	roc, err := validateReturnValuesOnConditionCheckFailure(in.ReturnValuesOnConditionCheckFailure)
+	if err != nil {
+		return PutItemOutput{}, err
+	}
+	ex, err := prepareExpressions(expressionRequest{
+		Condition: in.ConditionExpression,
+		Names:     in.ExpressionAttributeNames,
+		Values:    in.ExpressionAttributeValues,
+	})
+	if err != nil {
+		return PutItemOutput{}, err
+	}
+	cond := ex.Cond
 
 	// Item-size limit (JSON byte-length proxy).
 	wire, err := json.Marshal(in.Item)
 	if err != nil {
-		return fmt.Errorf("%w: marshal item: %v", ErrValidation, err)
+		return PutItemOutput{}, fmt.Errorf("%w: marshal item: %v", ErrValidation, err)
 	}
 	if len(wire) > maxItemBytes {
-		return fmt.Errorf("%w: item size %d exceeds %d bytes", ErrValidation, len(wire), maxItemBytes)
+		return PutItemOutput{}, fmt.Errorf("%w: item size %d exceeds %d bytes", ErrValidation, len(wire), maxItemBytes)
 	}
 
 	// Extract key column values.
 	hashVal, err := keyValue(hv)
 	if err != nil {
-		return err
+		return PutItemOutput{}, err
 	}
 	var rangeVal any
 	if def.Range != "" {
-		rangeVal, err = keyValue(rv)
+		rangeVal, err = keyValue(rvKey)
 		if err != nil {
-			return err
+			return PutItemOutput{}, err
 		}
 	}
 
-	if err := c.store.PutItem(tx, in.TableName, hashVal, rangeVal, wire); err != nil {
-		return err
+	// Read the existing item only when a condition or ALL_OLD needs it.
+	var old Item
+	if cond != nil || rv == returnValuesAllOld {
+		old, err = c.readItem(tx, in.TableName, hashVal, rangeVal)
+		if err != nil {
+			return PutItemOutput{}, err
+		}
 	}
-	return tx.Commit()
+	if err := checkCondition(cond, old, roc); err != nil {
+		return PutItemOutput{}, err
+	}
+
+	if err := c.store.PutItem(tx, in.TableName, hashVal, rangeVal, wire); err != nil {
+		return PutItemOutput{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return PutItemOutput{}, err
+	}
+
+	out := PutItemOutput{}
+	if rv == returnValuesAllOld {
+		out.Attributes = old
+	}
+	return out, nil
+}
+
+// readItem fetches and unmarshals the item at a key, returning a nil Item when
+// no row exists. Shared by the conditional write paths.
+func (c *Client) readItem(tx *sql.Tx, table string, hashVal, rangeVal any) (Item, error) {
+	data, found, err := c.store.GetItem(tx, table, hashVal, rangeVal)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	item := Item{}
+	if err := json.Unmarshal(data, &item); err != nil {
+		return nil, fmt.Errorf("ddb: unmarshal item: %w", err)
+	}
+	return item, nil
 }
 
 // GetItemInput carries the table name and the exact key to look up.
@@ -131,10 +208,25 @@ type GetItemOutput struct {
 	Item Item
 }
 
-// DeleteItemInput carries the table name and the exact key to delete.
+// DeleteItemInput carries the table name and the exact key to delete, plus the
+// optional condition expression and ReturnValues mode.
 type DeleteItemInput struct {
 	TableName string
 	Key       Item
+
+	ConditionExpression       string
+	ExpressionAttributeNames  map[string]string
+	ExpressionAttributeValues map[string]attrval.Value
+
+	// ReturnValues accepts NONE (default) or ALL_OLD.
+	ReturnValues string
+	// ReturnValuesOnConditionCheckFailure accepts NONE (default) or ALL_OLD.
+	ReturnValuesOnConditionCheckFailure string
+}
+
+// DeleteItemOutput carries the deleted item when ReturnValues=ALL_OLD.
+type DeleteItemOutput struct {
+	Attributes Item
 }
 
 // validateKey checks the Key carries exactly the table's key attributes with
@@ -217,38 +309,78 @@ func (c *Client) GetItem(ctx context.Context, in GetItemInput) (GetItemOutput, e
 	return GetItemOutput{Item: item}, tx.Commit()
 }
 
-func (c *Client) DeleteItem(ctx context.Context, in DeleteItemInput) error {
+func (c *Client) DeleteItem(ctx context.Context, in DeleteItemInput) (DeleteItemOutput, error) {
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
-		return err
+		return DeleteItemOutput{}, err
 	}
 	defer tx.Rollback()
 
 	def, err := c.store.GetTableDef(tx, in.TableName)
 	if errors.Is(err, storage.ErrNotFound) {
-		return fmt.Errorf("%w: table %q not found", ErrTableNotFound, in.TableName)
+		return DeleteItemOutput{}, fmt.Errorf("%w: table %q not found", ErrTableNotFound, in.TableName)
 	}
 	if err != nil {
-		return err
+		return DeleteItemOutput{}, err
 	}
 
-	hv, rv, err := validateKey(def, in.Key)
+	hv, rvKey, err := validateKey(def, in.Key)
 	if err != nil {
-		return err
+		return DeleteItemOutput{}, err
 	}
+
+	// Table and key first, then expressions — see PutItem.
+	rv, err := validateReturnValuesOldOnly(in.ReturnValues)
+	if err != nil {
+		return DeleteItemOutput{}, err
+	}
+	roc, err := validateReturnValuesOnConditionCheckFailure(in.ReturnValuesOnConditionCheckFailure)
+	if err != nil {
+		return DeleteItemOutput{}, err
+	}
+	ex, err := prepareExpressions(expressionRequest{
+		Condition: in.ConditionExpression,
+		Names:     in.ExpressionAttributeNames,
+		Values:    in.ExpressionAttributeValues,
+	})
+	if err != nil {
+		return DeleteItemOutput{}, err
+	}
+	cond := ex.Cond
+
 	hashVal, err := keyValue(hv)
 	if err != nil {
-		return err
+		return DeleteItemOutput{}, err
 	}
 	var rangeVal any
 	if def.Range != "" {
-		rangeVal, err = keyValue(rv)
+		rangeVal, err = keyValue(rvKey)
 		if err != nil {
-			return err
+			return DeleteItemOutput{}, err
 		}
 	}
-	if _, err := c.store.DeleteItem(tx, in.TableName, hashVal, rangeVal); err != nil {
-		return err
+
+	var old Item
+	if cond != nil || rv == returnValuesAllOld {
+		old, err = c.readItem(tx, in.TableName, hashVal, rangeVal)
+		if err != nil {
+			return DeleteItemOutput{}, err
+		}
 	}
-	return tx.Commit()
+	if err := checkCondition(cond, old, roc); err != nil {
+		return DeleteItemOutput{}, err
+	}
+
+	if _, err := c.store.DeleteItem(tx, in.TableName, hashVal, rangeVal); err != nil {
+		return DeleteItemOutput{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return DeleteItemOutput{}, err
+	}
+
+	out := DeleteItemOutput{}
+	if rv == returnValuesAllOld {
+		out.Attributes = old
+	}
+	return out, nil
 }

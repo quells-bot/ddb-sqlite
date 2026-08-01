@@ -26,7 +26,7 @@ var (
 )
 
 // Decimal is an exact decimal number. The zero value is NOT valid; obtain a
-// Decimal via Parse. (Arithmetic constructors arrive with expr in M2.)
+// Decimal via Parse or Zero.
 type Decimal struct {
 	coef  *big.Int // signed magnitude; value = coef × 10^(-scale). Set by Parse.
 	scale int      // digits after the decimal point, >= 0
@@ -153,16 +153,47 @@ func (d Decimal) Equal(o Decimal) bool {
 // and scale-insensitive.
 func (d Decimal) Compare(o Decimal) int {
 	if d.scale == o.scale {
-		return d.coef.Cmp(o.coef)
+		return d.coef.Cmp(o.coef) // fast path: no rescaling allocation
 	}
-	a := new(big.Int).Set(d.coef)
-	b := new(big.Int).Set(o.coef)
-	if d.scale < o.scale {
-		a.Mul(a, pow10(o.scale-d.scale))
-	} else {
-		b.Mul(b, pow10(d.scale-o.scale))
-	}
+	a, b, _ := align(d, o)
 	return a.Cmp(b)
+}
+
+// align rescales two decimals to a common scale, returning fresh coefficients
+// at that scale. Neither operand is mutated: both coefficients are copies.
+func align(d, o Decimal) (a, b *big.Int, scale int) {
+	a = new(big.Int).Set(d.coef)
+	b = new(big.Int).Set(o.coef)
+	switch {
+	case d.scale < o.scale:
+		a.Mul(a, pow10(o.scale-d.scale))
+		scale = o.scale
+	case d.scale > o.scale:
+		b.Mul(b, pow10(d.scale-o.scale))
+		scale = d.scale
+	default:
+		scale = d.scale
+	}
+	return a, b, scale
+}
+
+// Zero returns the Decimal 0. The zero Decimal{} value has a nil coefficient
+// and is not usable; callers that need an additive identity — ADD on a missing
+// attribute, for instance — use this.
+func Zero() Decimal { return Decimal{coef: big.NewInt(0), scale: 0} }
+
+// Add returns d + o exactly. The result is canonical (trailing fractional
+// zeros stripped). Add does NOT enforce DynamoDB's precision/range limits;
+// call Validate on the result at the point the value re-enters an item.
+func (d Decimal) Add(o Decimal) Decimal {
+	a, b, scale := align(d, o)
+	return canonicalize(Decimal{coef: a.Add(a, b), scale: scale})
+}
+
+// Sub returns d - o exactly. See Add.
+func (d Decimal) Sub(o Decimal) Decimal {
+	a, b, scale := align(d, o)
+	return canonicalize(Decimal{coef: a.Sub(a, b), scale: scale})
 }
 
 // Less reports whether d < o.

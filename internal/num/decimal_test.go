@@ -177,6 +177,76 @@ func TestDigits(t *testing.T) {
 	}
 }
 
+func TestZero(t *testing.T) {
+	z := Zero()
+	if got := z.String(); got != "0" {
+		t.Errorf("Zero().String() = %q, want \"0\"", got)
+	}
+	if err := z.Validate(); err != nil {
+		t.Errorf("Zero().Validate() = %v, want nil", err)
+	}
+	five, err := Parse("5")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := z.Add(five).String(); got != "5" {
+		t.Errorf("0 + 5 = %s, want 5", got)
+	}
+}
+
+func TestAddSub(t *testing.T) {
+	cases := []struct {
+		name             string
+		a, b             string
+		wantAdd, wantSub string
+	}{
+		{"integers", "2", "3", "5", "-1"},
+		{"mixed scales", "1.5", "0.25", "1.75", "1.25"},
+		{"negative operand", "-2.5", "1", "-1.5", "-3.5"},
+		{"trailing zeros are insignificant", "1.10", "1.1", "2.2", "0"},
+		{"result canonicalizes", "0.1", "0.9", "1", "-0.8"},
+		{"beyond int64", "99999999999999999999", "1", "100000000000000000000", "99999999999999999998"},
+		{"tiny scales", "0.0000000001", "0.0000000002", "0.0000000003", "-0.0000000001"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := Parse(tc.a)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tc.a, err)
+			}
+			b, err := Parse(tc.b)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tc.b, err)
+			}
+			if got := a.Add(b).String(); got != tc.wantAdd {
+				t.Errorf("%s + %s = %s, want %s", tc.a, tc.b, got, tc.wantAdd)
+			}
+			if got := a.Sub(b).String(); got != tc.wantSub {
+				t.Errorf("%s - %s = %s, want %s", tc.a, tc.b, got, tc.wantSub)
+			}
+			// Operands are immutable: neither receiver nor argument changed.
+			a2, _ := Parse(tc.a)
+			b2, _ := Parse(tc.b)
+			if a.Compare(a2) != 0 || b.Compare(b2) != 0 {
+				t.Errorf("Add/Sub mutated an operand: a=%s b=%s", a.String(), b.String())
+			}
+		})
+	}
+}
+
+// Arithmetic may produce a value outside DynamoDB's range; Validate is the
+// caller's gate, so the result must still be well-formed and detectable.
+func TestAddOverflowIsDetectable(t *testing.T) {
+	big1, err := Parse("9" + strings.Repeat("9", 37)) // 38 nines
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	sum := big1.Add(big1)
+	if err := sum.Validate(); err == nil {
+		t.Errorf("Validate() = nil for %s, want an error", sum.String())
+	}
+}
+
 func TestValidate(t *testing.T) {
 	// 1E-130 = "0." + 129 zeros + "1"  (smallest nonzero magnitude).
 	minValid := "0." + strings.Repeat("0", 129) + "1"

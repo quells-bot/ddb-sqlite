@@ -11,3 +11,21 @@ var (
 	ErrValidation       = errors.New("ddb: validation error")
 	ErrConditionalCheck = errors.New("ddb: conditional check failed") // used from M2
 )
+
+// ConditionalCheckFailedError is returned when a ConditionExpression evaluates
+// false. Item carries the pre-write item, populated only when the request set
+// ReturnValuesOnConditionCheckFailure=ALL_OLD.
+//
+// Is reports true for ErrConditionalCheck so existing errors.Is call sites keep
+// working; the adapter uses errors.As to recover Item.
+type ConditionalCheckFailedError struct {
+	Item Item
+}
+
+func (e *ConditionalCheckFailedError) Error() string {
+	return ErrConditionalCheck.Error()
+}
+
+func (e *ConditionalCheckFailedError) Is(target error) bool {
+	return target == ErrConditionalCheck
+}
