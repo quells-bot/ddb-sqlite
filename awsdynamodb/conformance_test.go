@@ -34,6 +34,8 @@ type api interface {
 	GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
+	Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
+	Scan(ctx context.Context, params *dynamodb.ScanInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error)
 }
 
 type confTarget struct {
@@ -260,6 +262,27 @@ func mustCreate(t *testing.T, c api, ctx context.Context, name string) {
 }
 
 func strVal(s string) types.AttributeValue { return &types.AttributeValueMemberS{Value: s} }
+
+// mustCreateComposite creates a table with a composite primary key (pk HASH S,
+// sk RANGE N) for Query/Scan conformance cases.
+func mustCreateComposite(t *testing.T, c api, ctx context.Context, name string) {
+	t.Helper()
+	_, err := c.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName: aws.String(name),
+		KeySchema: []types.KeySchemaElement{
+			{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash},
+			{AttributeName: aws.String("sk"), KeyType: types.KeyTypeRange},
+		},
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("sk"), AttributeType: types.ScalarAttributeTypeN},
+		},
+		BillingMode: types.BillingModePayPerRequest,
+	})
+	if err != nil {
+		t.Fatalf("CreateTable %q: %v", name, err)
+	}
+}
 
 func asResourceNotFound(t *testing.T, err error, msg string) {
 	t.Helper()
@@ -2190,5 +2213,811 @@ func TestConfReturnValuesCaseSensitivity(t *testing.T) {
 			})
 			asValidation(t, err, `ReturnValues "AllOld"`)
 		})
+	})
+}
+
+// --- M3 conformance cases (Query/Scan) ---
+
+// seedComposite seeds n items into partition pkVal with sk 0..n-1 and a
+// itemKey returns a stable string identifying a composite item (pk "|" sk) so
+// tests can compare item sets across scans.
+func itemKey(it map[string]types.AttributeValue) string {
+	pk := it["pk"].(*types.AttributeValueMemberS)
+	sk := it["sk"].(*types.AttributeValueMemberN)
+	return pk.Value + "|" + sk.Value
+}
+
+// "flag" attribute ("yes" on even sk, "no" on odd). Returns the partition
+// value.
+func seedComposite(t *testing.T, c api, ctx context.Context, table, pkVal string, n int) {
+	t.Helper()
+	for i := range n {
+		flag := "no"
+		if i%2 == 0 {
+			flag = "yes"
+		}
+		putConf(t, c, ctx, table, map[string]types.AttributeValue{
+			"pk":   strVal(pkVal),
+			"sk":   numVal(strconv.Itoa(i)),
+			"flag": strVal(flag),
+		})
+	}
+}
+
+func TestConfQueryBasic(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 5)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if out.Count != 5 {
+			t.Errorf("Count = %d, want 5", out.Count)
+		}
+	})
+}
+
+func TestConfQuerySortKeyConditions(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 10)
+
+		cases := []struct {
+			name string
+			b    expression.Builder
+			want int32
+		}{
+			{"sk<5", expression.NewBuilder().WithKeyCondition(
+				expression.Key("pk").Equal(expression.Value("p1")).And(expression.Key("sk").LessThan(expression.Value(5)))), 5},
+			{"sk<=4", expression.NewBuilder().WithKeyCondition(
+				expression.Key("pk").Equal(expression.Value("p1")).And(expression.Key("sk").LessThanEqual(expression.Value(4)))), 5},
+			{"sk>7", expression.NewBuilder().WithKeyCondition(
+				expression.Key("pk").Equal(expression.Value("p1")).And(expression.Key("sk").GreaterThan(expression.Value(7)))), 2},
+			{"sk>=8", expression.NewBuilder().WithKeyCondition(
+				expression.Key("pk").Equal(expression.Value("p1")).And(expression.Key("sk").GreaterThanEqual(expression.Value(8)))), 2},
+			{"sk BETWEEN 3 AND 6", expression.NewBuilder().WithKeyCondition(
+				expression.Key("pk").Equal(expression.Value("p1")).And(expression.Key("sk").Between(expression.Value(3), expression.Value(6)))), 4},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				expr := mustExpr(t, tc.b)
+				out, err := c.Query(ctx, &dynamodb.QueryInput{
+					TableName:                 aws.String("ConfT"),
+					KeyConditionExpression:    expr.KeyCondition(),
+					ExpressionAttributeNames:  expr.Names(),
+					ExpressionAttributeValues: expr.Values(),
+				})
+				if err != nil {
+					t.Fatalf("Query: %v", err)
+				}
+				if out.Count != tc.want {
+					t.Errorf("Count = %d, want %d", out.Count, tc.want)
+				}
+			})
+		}
+	})
+}
+
+func TestConfQueryScanIndexForward(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 5)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ScanIndexForward:          aws.Bool(false),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if out.Count != 5 {
+			t.Fatalf("Count = %d, want 5", out.Count)
+		}
+		// First item should have sk=4 (highest, reverse order).
+		first := out.Items[0]["sk"]
+		if first != nil && first.(*types.AttributeValueMemberN).Value != "4" {
+			t.Errorf("first item sk = %v, want 4", first)
+		}
+	})
+}
+
+func TestConfQueryPKSKOrdering(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 10)
+
+		// pk = :v AND sk > :x
+		expr1 := mustExpr(t, expression.NewBuilder().WithKeyCondition(
+			expression.Key("pk").Equal(expression.Value("p1")).And(expression.Key("sk").GreaterThan(expression.Value(5)))))
+		out1, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr1.KeyCondition(),
+			ExpressionAttributeNames:  expr1.Names(),
+			ExpressionAttributeValues: expr1.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query pk AND sk: %v", err)
+		}
+
+		// sk > :x AND pk = :v (reversed order). The SDK expression builder refuses
+		// to construct a key condition whose partition-key equality is not the
+		// leftmost AND operand, so this is sent as a raw string (the shape real
+		// callers hand DynamoDB). Both targets accept the reversed operand order.
+		out2, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    aws.String("sk > :x AND pk = :v"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{":x": numVal("5"), ":v": strVal("p1")},
+		})
+		if err != nil {
+			t.Fatalf("Query sk AND pk: %v", err)
+		}
+		if out1.Count != out2.Count {
+			t.Errorf("ordering: pk-first Count=%d, sk-first Count=%d, want equal", out1.Count, out2.Count)
+		}
+	})
+}
+
+func TestConfQueryPagination(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 10)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+
+		// Limit=3: first page.
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Limit:                     aws.Int32(3),
+		})
+		if err != nil {
+			t.Fatalf("Query page 1: %v", err)
+		}
+		if out.ScannedCount != 3 || out.Count != 3 {
+			t.Errorf("page 1: Scanned=%d Count=%d, want 3/3", out.ScannedCount, out.Count)
+		}
+		if out.LastEvaluatedKey == nil {
+			t.Fatal("page 1 LEK = nil, want non-nil")
+		}
+
+		// Resume.
+		out2, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Limit:                     aws.Int32(3),
+			ExclusiveStartKey:         out.LastEvaluatedKey,
+		})
+		if err != nil {
+			t.Fatalf("Query page 2: %v", err)
+		}
+		if out2.Count == 0 {
+			t.Error("page 2 Count = 0, want > 0")
+		}
+	})
+}
+
+func TestConfQueryLimitEqualsAvailable(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 10)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Limit:                     aws.Int32(10),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if out.LastEvaluatedKey == nil {
+			t.Error("LEK = nil, want non-nil (ScannedCount == Limit)")
+		}
+
+		// Resume: trailing empty page.
+		out2, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Limit:                     aws.Int32(10),
+			ExclusiveStartKey:         out.LastEvaluatedKey,
+		})
+		if err != nil {
+			t.Fatalf("Query resume: %v", err)
+		}
+		if out2.LastEvaluatedKey != nil {
+			t.Error("trailing page LEK = non-nil, want nil")
+		}
+	})
+}
+
+func TestConfQueryLimitZero(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 3)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Limit:                     aws.Int32(0),
+		})
+		asValidation(t, err, "Limit=0 should be rejected")
+	})
+}
+
+func TestConfQueryFilterExpression(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 10)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		filterExpr := expression.Name("flag").Equal(expression.Value("yes"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr).WithFilter(filterExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			FilterExpression:          expr.Filter(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Limit:                     aws.Int32(3),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if out.ScannedCount != 3 {
+			t.Errorf("ScannedCount = %d, want 3", out.ScannedCount)
+		}
+		if out.LastEvaluatedKey == nil {
+			t.Error("LEK = nil, want non-nil (ScannedCount == Limit)")
+		}
+	})
+}
+
+func TestConfQueryFilterKeyAttr(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 3)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		filterExpr := expression.Name("sk").Equal(expression.Value(1))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr).WithFilter(filterExpr))
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			FilterExpression:          expr.Filter(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		asValidation(t, err, "filter on key attribute should be rejected")
+	})
+}
+
+func TestConfQuerySelectCount(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 5)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Select:                    types.SelectCount,
+			Limit:                     aws.Int32(3),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(out.Items) > 0 {
+			t.Errorf("Items = %d items, want 0 (Select=COUNT)", len(out.Items))
+		}
+		if out.Count != 3 {
+			t.Errorf("Count = %d, want 3", out.Count)
+		}
+		if out.LastEvaluatedKey == nil {
+			t.Error("LEK = nil, want non-nil")
+		}
+	})
+}
+
+func TestConfScanBasic(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 5)
+		seedComposite(t, c, ctx, "ConfT", "p2", 3)
+
+		out, err := c.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String("ConfT")})
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if out.Count != 8 {
+			t.Errorf("Count = %d, want 8", out.Count)
+		}
+	})
+}
+
+func TestConfScanPagination(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 10)
+
+		var total int32
+		var start map[string]types.AttributeValue
+		for {
+			out, err := c.Scan(ctx, &dynamodb.ScanInput{
+				TableName:         aws.String("ConfT"),
+				Limit:             aws.Int32(3),
+				ExclusiveStartKey: start,
+			})
+			if err != nil {
+				t.Fatalf("Scan: %v", err)
+			}
+			total += out.Count
+			if out.LastEvaluatedKey == nil {
+				break
+			}
+			start = out.LastEvaluatedKey
+		}
+		if total != 10 {
+			t.Errorf("pagination total = %d, want 10", total)
+		}
+	})
+}
+
+// TestConfParallelScan (case 27) verifies that a scan split into TotalSegments
+// disjoint segments returns, in union, exactly the full item set, with every
+// item appearing in precisely one segment (no overlap, no omission).
+func TestConfParallelScan(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		// Seed several partitions so each segment is non-trivial.
+		const itemsPerPartition, partitions = 10, 3
+		for pi := range partitions {
+			seedComposite(t, c, ctx, "ConfT", fmt.Sprintf("p%d", pi), itemsPerPartition)
+		}
+		totalItems := itemsPerPartition * partitions
+
+		// Reference: a full scan gives the complete item set.
+		full, err := c.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String("ConfT")})
+		if err != nil {
+			t.Fatalf("full Scan: %v", err)
+		}
+		fullSet := map[string]bool{}
+		for _, it := range full.Items {
+			fullSet[itemKey(it)] = true
+		}
+		if len(fullSet) != totalItems {
+			t.Fatalf("full scan returned %d distinct items, want %d", len(fullSet), totalItems)
+		}
+
+		// Parallel scan: TotalSegments=3, one scan per Segment 0..2.
+		const totalSegments = 3
+		union := map[string]bool{}
+		var unionCount int
+		seenInSegments := map[string]int{}
+		for seg := range totalSegments {
+			out, err := c.Scan(ctx, &dynamodb.ScanInput{
+				TableName:     aws.String("ConfT"),
+				TotalSegments: aws.Int32(totalSegments),
+				Segment:       aws.Int32(int32(seg)),
+			})
+			if err != nil {
+				t.Fatalf("Scan segment %d: %v", seg, err)
+			}
+			unionCount += len(out.Items)
+			for _, it := range out.Items {
+				k := itemKey(it)
+				union[k] = true
+				seenInSegments[k]++
+			}
+		}
+
+		// Union equals the full item set (all items, no omission).
+		if len(union) != totalItems {
+			t.Errorf("parallel scan union has %d distinct items, want %d (== full scan)", len(union), totalItems)
+		}
+		for k := range fullSet {
+			if !union[k] {
+				t.Errorf("item %q missing from parallel scan union", k)
+			}
+		}
+		// No overlap: every item appears in exactly one segment.
+		if unionCount != totalItems {
+			t.Errorf("parallel scan returned %d items total, want %d (no duplicates)", unionCount, totalItems)
+		}
+		for k, n := range seenInSegments {
+			if n != 1 {
+				t.Errorf("item %q appeared in %d segments, want 1", k, n)
+			}
+		}
+	})
+}
+
+func TestConfScanLimitZero(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 3)
+
+		_, err := c.Scan(ctx, &dynamodb.ScanInput{
+			TableName: aws.String("ConfT"),
+			Limit:     aws.Int32(0),
+		})
+		asValidation(t, err, "Scan Limit=0 should be rejected")
+	})
+}
+
+func TestConfBeginsWithOnNumber(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 3)
+
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(
+			expression.Key("pk").Equal(expression.Value("p1")).And(
+				expression.Key("sk").BeginsWith("1"))))
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		asValidation(t, err, "begins_with on N sort key should be rejected")
+	})
+}
+
+// TestConfQueryBeginsWithOnStringSortKey covers the begins_with-on-S gap in
+// case 17 (TestConfQuerySortKeyConditions only exercised =,<,<=,>,>=,BETWEEN
+// on an N sort key). It creates a composite table with an S sort key and
+// asserts begins_with(sk, :prefix) returns exactly the prefix-matching items.
+// This is the case that would have caught the P0 bug (the S-key upper-bound
+// successor bound as BLOB instead of TEXT).
+func TestConfQueryBeginsWithOnStringSortKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		_, err := c.CreateTable(ctx, &dynamodb.CreateTableInput{
+			TableName: aws.String("ConfT"),
+			KeySchema: []types.KeySchemaElement{
+				{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash},
+				{AttributeName: aws.String("sk"), KeyType: types.KeyTypeRange},
+			},
+			AttributeDefinitions: []types.AttributeDefinition{
+				{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+				{AttributeName: aws.String("sk"), AttributeType: types.ScalarAttributeTypeS},
+			},
+			BillingMode: types.BillingModePayPerRequest,
+		})
+		if err != nil {
+			t.Fatalf("CreateTable: %v", err)
+		}
+		for _, sk := range []string{"apple", "apricot", "avocado", "banana", "cherry"} {
+			putConf(t, c, ctx, "ConfT", map[string]types.AttributeValue{
+				"pk": strVal("p1"),
+				"sk": strVal(sk),
+			})
+		}
+
+		// begins_with(sk, "ap") matches apple, apricot (avocado starts with "av"
+		// and must be excluded; banana and cherry don't match either).
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(
+			expression.Key("pk").Equal(expression.Value("p1")).And(
+				expression.Key("sk").BeginsWith("ap"))))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if out.Count != 2 {
+			t.Errorf("Count = %d, want 2 (only prefix-matching items)", out.Count)
+		}
+
+		// begins_with on a prefix with no matches returns 0.
+		expr2 := mustExpr(t, expression.NewBuilder().WithKeyCondition(
+			expression.Key("pk").Equal(expression.Value("p1")).And(
+				expression.Key("sk").BeginsWith("zz"))))
+		out2, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr2.KeyCondition(),
+			ExpressionAttributeNames:  expr2.Names(),
+			ExpressionAttributeValues: expr2.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query (no-match): %v", err)
+		}
+		if out2.Count != 0 {
+			t.Errorf("Count = %d, want 0 for non-matching prefix", out2.Count)
+		}
+	})
+}
+
+func TestConfKeyConditionRejections(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 3)
+
+		cases := []struct {
+			name string
+			src  string
+		}{
+			{"OR", "pk = :v OR sk = :s"},
+			{"NOT", "NOT pk = :v"},
+			{"non-equality PK", "pk > :v"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := c.Query(ctx, &dynamodb.QueryInput{
+					TableName:                 aws.String("ConfT"),
+					KeyConditionExpression:    aws.String(tc.src),
+					ExpressionAttributeValues: map[string]types.AttributeValue{":v": strVal("p1"), ":s": numVal("1")},
+				})
+				asValidation(t, err, tc.name+" should be rejected")
+			})
+		}
+	})
+}
+
+func TestConfExclusiveStartKeyValidation(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 3)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+
+		// Partition mismatch.
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ExclusiveStartKey: map[string]types.AttributeValue{
+				"pk": strVal("WRONG"),
+				"sk": numVal("0"),
+			},
+		})
+		asValidation(t, err, "partition mismatch should be rejected")
+
+		// Key carrying extra attributes (spec case 30).
+		_, err = c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ExclusiveStartKey: map[string]types.AttributeValue{
+				"pk":    strVal("p1"),
+				"sk":    numVal("0"),
+				"extra": strVal("x"),
+			},
+		})
+		asValidation(t, err, "extra attributes on ExclusiveStartKey should be rejected")
+	})
+}
+
+func TestConfIndexName(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 3)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			IndexName:                 aws.String("my-gsi"),
+		})
+		asValidation(t, err, "IndexName should be rejected in M3")
+	})
+}
+
+func TestConfLegacyParams(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 3)
+
+		_, isAdapter := c.(*awsdynamodb.Adapter)
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName: aws.String("ConfT"),
+			KeyConditions: map[string]types.Condition{
+				"pk": {ComparisonOperator: types.ComparisonOperatorEq, AttributeValueList: []types.AttributeValue{strVal("p1")}},
+			},
+		})
+		if isAdapter {
+			// M3 deliberately does not implement the deprecated pre-expression
+			// parameters; the adapter rejects a non-empty KeyConditions with a
+			// ValidationException so a caller never believes the constraint was
+			// applied. This is an adapter scope decision (see design spec §7.5).
+			asValidation(t, err, "legacy KeyConditions should be rejected on the adapter")
+			return
+		}
+		// The reference (dynamodb-local 3.3.1) still accepts the deprecated
+		// KeyConditions parameter (returns the items). The reference wins over
+		// the spec's §7.5 "reject legacy params" claim: this divergence is
+		// documented in the design spec §7.5, not fixed in the engine.
+		if err != nil {
+			t.Fatalf("reference accepted legacy KeyConditions: %v", err)
+		}
+	})
+}
+
+func TestConfPresentButEmptyExpressions(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 3)
+
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:              aws.String("ConfT"),
+			KeyConditionExpression: aws.String(""),
+		})
+		asValidation(t, err, "empty KeyConditionExpression should be rejected")
+	})
+}
+
+func TestConfQueryLimitExceedsAvailable(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 10)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Limit:                     aws.Int32(15),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if out.ScannedCount != 10 {
+			t.Errorf("ScannedCount = %d, want 10", out.ScannedCount)
+		}
+		if out.LastEvaluatedKey != nil {
+			t.Error("LEK = non-nil, want nil (exhausted)")
+		}
+	})
+}
+
+func TestConfQueryLimitAfterKeyNarrowing(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 10)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1")).And(
+			expression.Key("sk").Between(expression.Value(2), expression.Value(7)))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Limit:                     aws.Int32(3),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if out.ScannedCount != 3 {
+			t.Errorf("ScannedCount = %d, want 3", out.ScannedCount)
+		}
+		if out.LastEvaluatedKey == nil {
+			t.Error("LEK = nil, want non-nil")
+		}
+	})
+}
+
+func TestConfQueryReverseWithLimit(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 5)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ScanIndexForward:          aws.Bool(false),
+			Limit:                     aws.Int32(1),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if out.Count != 1 {
+			t.Fatalf("Count = %d, want 1", out.Count)
+		}
+		sk := out.Items[0]["sk"].(*types.AttributeValueMemberN).Value
+		if sk != "4" {
+			t.Errorf("first reverse sk = %s, want 4", sk)
+		}
+	})
+}
+
+func TestConfSelectCountWithLimitAndFilter(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 10)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		filterExpr := expression.Name("flag").Equal(expression.Value("yes"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr).WithFilter(filterExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			FilterExpression:          expr.Filter(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Select:                    types.SelectCount,
+			Limit:                     aws.Int32(10),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(out.Items) > 0 {
+			t.Errorf("Items = %d, want 0", len(out.Items))
+		}
+		if out.ScannedCount != 10 {
+			t.Errorf("ScannedCount = %d, want 10", out.ScannedCount)
+		}
+		if out.LastEvaluatedKey == nil {
+			t.Error("LEK = nil, want non-nil (ScannedCount == Limit)")
+		}
 	})
 }

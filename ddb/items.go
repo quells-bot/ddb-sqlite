@@ -181,7 +181,7 @@ func (c *Client) PutItem(ctx context.Context, in PutItemInput) (PutItemOutput, e
 // readItem fetches and unmarshals the item at a key, returning a nil Item when
 // no row exists. Shared by the conditional write paths.
 func (c *Client) readItem(tx *sql.Tx, table string, hashVal, rangeVal any) (Item, error) {
-	data, found, err := c.store.GetItem(tx, table, hashVal, rangeVal)
+	_, data, found, err := c.store.GetItem(tx, table, hashVal, rangeVal)
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +295,7 @@ func (c *Client) GetItem(ctx context.Context, in GetItemInput) (GetItemOutput, e
 		}
 	}
 
-	data, found, err := c.store.GetItem(tx, in.TableName, hashVal, rangeVal)
+	_, data, found, err := c.store.GetItem(tx, in.TableName, hashVal, rangeVal)
 	if err != nil {
 		return GetItemOutput{}, err
 	}

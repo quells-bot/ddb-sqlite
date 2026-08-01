@@ -181,17 +181,53 @@ One lexer + parser produces an AST; one evaluator serves condition **and** filte
 ### 6.3 Query
 
 - Scope by partition key equality **in SQLite** (index seek); apply the sort-key condition (`= < <= > >= BETWEEN begins_with`) as a SQLite range predicate on the indexed `range` column — this is the key-narrowing SQLite does.
-- `ScanIndexForward` controls ASC/DESC order. `Limit` caps items **before** filter (DynamoDB counts items scanned, not returned). `ExclusiveStartKey` resumes from a key; `LastEvaluatedKey` emitted when stopped early.
+- `ScanIndexForward` controls ASC/DESC sort order; `Limit` is a *read budget* applied **before** `FilterExpression` and **after** the sort-key condition narrows the candidate set. `ExclusiveStartKey` resumes from a key; `LastEvaluatedKey` follows the stop-reason rules in §6.5.
 - `FilterExpression` evaluated **in Go** after the key scan; filtered-out items still count toward `Limit`/`ScannedCount`. Both `ScannedCount` and `Count` reported.
 - `IndexName` → query the GSI index table instead (sparse semantics); GSI projection applied at fetch.
 
 ### 6.4 Scan
 
-Full table scan (or GSI scan via `IndexName`), ordered by rowid; `Limit`/`ExclusiveStartKey`/`LastEvaluatedKey`/`FilterExpression` as in Query. `Segment`/`TotalSegments` for parallel scan — honored by partitioning the rowid range so parallel scans don't overlap.
+Full table scan (or GSI scan via `IndexName`), ordered by rowid within a partition; cross-partition order is undefined. `Limit`/`ExclusiveStartKey`/`LastEvaluatedKey`/`FilterExpression` follow the same contract as Query (§6.5), including the `ScannedCount`/`Count` split and the LEK stop-reason rule. `Segment`/`TotalSegments` for parallel scan — honored by partitioning the rowid range so parallel scans don't overlap.
 
 ### 6.5 Pagination semantics (faithful)
 
-`LastEvaluatedKey` is the key of the last *scanned* item (even if filtered out), so a subsequent request with it as `ExclusiveStartKey` resumes exactly. `Limit=0` returns no items but sets `LastEvaluatedKey` if the table is non-empty (DynamoDB behavior).
+`LastEvaluatedKey` is the full primary key of the last *scanned* item (even if filtered out), so a subsequent request with it as `ExclusiveStartKey` resumes exactly. The full pagination contract below was measured against `dynamodb-local:3.3.1` via the AWS SDK v2 (probe methodology at the end of this section); it corrects an earlier draft that asserted `Limit=0` returns items — `Limit=0` is in fact rejected.
+
+**Limit is a read budget, applied before FilterExpression.** `Limit` caps the number of items *examined* (`ScannedCount`), not the number *returned* (`Count`). A filter discards scanned items but never causes extra reads: `Count ≤ ScannedCount ≤ Limit`. The engine must track and report both counters separately.
+
+**`Limit=0` is rejected.** Both Query and Scan return `ValidationException: Limit must be greater than or equal to 1`. (The earlier draft's "`Limit=0` returns no items but sets `LastEvaluatedKey`" was wrong; the probe corrected it.)
+
+**`LastEvaluatedKey` is governed by the stop reason, not by item count:**
+
+- **Set** when the stop reason is "Limit reached" — i.e. `ScannedCount == Limit`. This holds *even when the Limit-th item is the last item in the scope*: `Limit` exactly equal to the available item count still yields a non-nil LEK, and resuming from it returns an empty trailing page (`ScannedCount=0`, `LEK=nil`).
+- **Nil** when items are exhausted — `ScannedCount < Limit` (fewer items than the budget), or no `Limit` and the whole scope was read.
+
+The only reliable pagination terminator is `LEK == nil`. A caller cannot conclude "done" from `Limit ≥ item count`; only the absence of LEK proves exhaustion.
+
+**Limit caps at available items (no padding).** `Limit` larger than the scope reads exactly the available count; `ScannedCount` never exceeds the item count and never exceeds `Limit`.
+
+**Limit applies after key-condition narrowing (Query).** The sort-key condition (`BETWEEN`, `<`, `begins_with`, …) first restricts the candidate set; `Limit` then bounds how many of those candidates are read, in sort order. `ScanIndexForward=false` reads from the high sort-key end and Limit counts from there.
+
+**Trailing empty pages.** A pagination walk emits a final round with `Count=0`/`ScannedCount=0`/`LEK=nil` iff the last non-empty round hit `ScannedCount == Limit` exactly at the final item. Pagination loops must terminate on `LEK == nil` and tolerate this empty round.
+
+**Scan ordering.** Within a partition, sort-key order holds; across partitions, Scan order is undefined (the probe observed one partition's items before another's with no caller-controllable order). Clients must not rely on cross-partition Scan order.
+
+**Consumed capacity scales with `ScannedCount`.** Every scanned item costs a read regardless of whether the filter kept it — the cost rationale for narrow key conditions and selective filters (provisioned-capacity accounting is otherwise out of scope for v1, but this invariant informs the `ScannedCount`/`Count` split).
+
+**Probe methodology (drives the M3 conformance cases).** The findings above were measured by `awsdynamodb/limit_probe_test.go` against `dynamodb-local:3.3.1` launched via `dockertest` (rootless podman), using the real AWS SDK v2 `Query`/`Scan`. A composite-primary-key table (`pk` HASH type S, `sk` RANGE type N, plus a `flag` attribute) was seeded with 12 items: partition `P1` with `sk` 0–9 (`flag="yes"` on even `sk`, 5 yes) and `P2` with `sk` 0–1 (1 yes). The scenarios and what each establishes:
+
+- **Q1–Q2:** no-Limit full read vs `Limit=3` — establishes `ScannedCount == Count == Limit` with no filter, LEK set when Limit < scope.
+- **Q3:** `Limit=3` + `filter=flag:"yes"` — establishes `ScannedCount=3, Count=2`: Limit counts reads, filter keeps a subset.
+- **Q4/Q4b:** `Limit=10` over a 10-item partition + filter — establishes LEK *still set* at `ScannedCount==Limit`, and resuming yields an empty trailing page.
+- **Q5:** `Limit=11 > 10` — establishes exhaustion (`ScannedCount < Limit`) ⇒ LEK nil, no trailing page.
+- **Q6/S4:** `Limit=0` — establishes the `ValidationException` rejection.
+- **Q7:** `Limit=1`, `ScanIndexForward=false` — establishes reverse read from the high sort-key end.
+- **Q8:** `Limit=1` + a filter matching nothing in the 1-item window — establishes `Count=0` but LEK set (a read was consumed, more remain).
+- **Q9:** Query pagination walk, `Limit=3` + filter — establishes recovery of all matches (5 yes) while scanning every item (10), terminating on LEK nil.
+- **Q10:** `sk BETWEEN 2 AND 7` + `Limit=3` — establishes Limit applied after key-condition narrowing.
+- **S1–S3/S5/S6:** Scan analogs — full read, `Limit=4`, `Limit=4`+filter, `Limit=0` rejection, and two full pagination walks (with and without filter) recovering all items/matches.
+
+These scenarios are the basis for the M3 conformance cases; each will be ported into `awsdynamodb/conformance_test.go` (parameterized to run against both the adapter and `dynamodb-local`) once `Query`/`Scan` are implemented.
 
 ### 6.6 Error contracts
 
@@ -236,7 +272,7 @@ Since the library's purpose is to be a faithful test double, the highest-value t
 1. **Engine unit tests** (`internal/`): table-driven tests for the expression parser/evaluator (condition/filter/update: expression string + item → expected bool or resulting item), storage round-trips, GSI maintenance, TTL filtering. Fast and hermetic.
 2. **Adapter conformance suite** (`awsdynamodb/`): scenarios written against the SDK's `DynamoDBAPI` interface — CRUD, conditional writes, Query/Scan pagination, GSIs, batch ops, update expressions, error cases. **Parameterized by the interface**, so the same suite can be pointed at (a) `*awsdynamodb.Adapter` wrapping an in-memory `*ddb.Client`, and (b) a real `DynamoDB-local`/LocalStack instance when an env flag (`DDBSQLITE_CONF_TARGET=dynamodb-local`) is set. Continuous cross-validation against the reference during development without a hard CI dependency.
 3. **Fuzzing** (`go test -fuzz`): the expression lexer/parser/evaluator for panics and for "parse → eval → no panic on arbitrary input"; valid-expression round-trip stability.
-4. **Golden corpus** of real DynamoDB edge cases (null vs missing attributes, type-mismatched comparisons, sparse GSIs, empty containers, `Limit=0`, `LastEvaluatedKey` resume) encoded as conformance cases — exactly where "semantically faithful" is most likely to silently break.
+4. **Golden corpus** of real DynamoDB edge cases (null vs missing attributes, type-mismatched comparisons, sparse GSIs, empty containers, `Limit=0` rejection, `LastEvaluatedKey` resume, trailing empty pages) encoded as conformance cases — exactly where "semantically faithful" is most likely to silently break.
 
 The conformance suite doubles as living documentation of supported behavior and the regression net when the engine changes.
 
@@ -269,9 +305,9 @@ num.Decimal ──┐
 - **M0 — Foundations (parallel).** `num.Decimal` (exact decimal, comparison/ordering, canonical string — pure, fuzzable) and `attrval.Value` (tagged union, wire JSON round-trip, set dedup, document-path navigation).
 - **M1 — Walking skeleton.** `storage` (`*sql.DB` open/config/pragmas, catalog bootstrap, table-name hashing, DDL generation); `ddb` table ops (`CreateTable`/`DescribeTable`/`ListTables`/`DeleteTable`); `ddb` basic items (`PutItem`/`GetItem` key-based with 400KB limit, `DeleteItem`); `awsdynamodb` adapter (type marshaling + error mapping for the above); conformance harness skeleton, runnable vs the adapter and vs `dynamodb-local`.
 - **M2 — Expressions wired in.** `expr` (lexer/parser/AST, condition+filter evaluator, update evaluator, substitution); condition expressions into `Put`/`Update`/`Delete`; `UpdateItem` with update expressions + `ReturnValues`; filter expressions into `Query`/`Scan` (which arrive in M3).
-- **M3 — Query/Scan & pagination.** `Query` (partition seek + sort-key range narrowing in SQLite, `ScanIndexForward`, `Limit`, `ExclusiveStartKey`/`LastEvaluatedKey`); `Scan` (full/GSI scan, parallel-scan segments).
+- **M3 — Query/Scan & pagination.** `Query` (partition seek + sort-key range narrowing in SQLite, `ScanIndexForward`, `Limit`, `ExclusiveStartKey`/`LastEvaluatedKey`); `Scan` (full/GSI scan, parallel-scan segments). `Limit` is a read budget applied before `FilterExpression` (`ScannedCount`/`Count` reported separately); `Limit≥1` validated (else `ValidationException`); `LastEvaluatedKey` follows the stop-reason contract in §6.5. The `Limit`/LEK/filter semantics were probed against `dynamodb-local:3.3.1` (see §6.5 methodology) and the M3 conformance cases derive from those scenarios.
 - **M4 — GSI support.** Write-triggered GSI maintenance; GSI `Query`/`Scan` with read-time projection.
 - **M5 — Batch & TTL.** `BatchWriteItem`/`BatchGetItem`; lazy TTL filtering on reads, `ExpireExpired`.
-- **M6 — Hardening.** `UpdateTable` (GSI add/remove); full conformance golden corpus; fuzz pass; edge cases (null vs missing, type-mismatched comparisons, sparse GSIs, `Limit=0`).
+- **M6 — Hardening.** `UpdateTable` (GSI add/remove); full conformance golden corpus; fuzz pass; edge cases (null vs missing, type-mismatched comparisons, sparse GSIs, trailing empty pages, `LastEvaluatedKey` resume at partition end).
 
 M0's two packages are genuinely parallel; M1 `storage` and the table-ops can also overlap. The critical path is `attrval → storage → ddb → adapter`, with `expr` joining at M2. Each milestone is independently testable against the conformance harness.

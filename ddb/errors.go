@@ -29,3 +29,7 @@ func (e *ConditionalCheckFailedError) Error() string {
 func (e *ConditionalCheckFailedError) Is(target error) bool {
 	return target == ErrConditionalCheck
 }
+
+// ErrGsiNotFound is returned when IndexName is non-empty but the table has no
+// such GSI (GSIs arrive in M4; in M3 any IndexName is rejected).
+var ErrGsiNotFound = errors.New("ddb: global secondary index not found")

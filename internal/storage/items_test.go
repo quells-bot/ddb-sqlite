@@ -19,7 +19,7 @@ func TestPutGetDeleteItem(t *testing.T) {
 	if err := s.PutItem(tx, "T", "k1", nil, blob); err != nil {
 		t.Fatalf("PutItem: %v", err)
 	}
-	got, found, err := s.GetItem(tx, "T", "k1", nil)
+	_, got, found, err := s.GetItem(tx, "T", "k1", nil)
 	if err != nil || !found {
 		t.Fatalf("GetItem: got=%q found=%v err=%v", got, found, err)
 	}
@@ -29,13 +29,13 @@ func TestPutGetDeleteItem(t *testing.T) {
 
 	// Overwrite.
 	s.PutItem(tx, "T", "k1", nil, []byte("world"))
-	got, _, _ = s.GetItem(tx, "T", "k1", nil)
+	_, got, _, _ = s.GetItem(tx, "T", "k1", nil)
 	if string(got) != "world" {
 		t.Errorf("overwrite = %q, want world", got)
 	}
 
 	// Missing key.
-	_, found, _ = s.GetItem(tx, "T", "missing", nil)
+	_, _, found, _ = s.GetItem(tx, "T", "missing", nil)
 	if found {
 		t.Error("missing key returned found=true")
 	}
@@ -45,7 +45,7 @@ func TestPutGetDeleteItem(t *testing.T) {
 	if err != nil || !found {
 		t.Fatalf("DeleteItem: found=%v err=%v", found, err)
 	}
-	_, found, _ = s.GetItem(tx, "T", "k1", nil)
+	_, _, found, _ = s.GetItem(tx, "T", "k1", nil)
 	if found {
 		t.Error("after delete, key still found")
 	}
@@ -67,11 +67,11 @@ func TestPutGetItemWithRange(t *testing.T) {
 	s.PutItem(tx, "R", "p1", "s1", []byte("a"))
 	s.PutItem(tx, "R", "p1", "s2", []byte("b"))
 
-	got, found, _ := s.GetItem(tx, "R", "p1", "s2")
+	_, got, found, _ := s.GetItem(tx, "R", "p1", "s2")
 	if !found || string(got) != "b" {
 		t.Errorf("GetItem(p1,s2) = %q found=%v", got, found)
 	}
-	_, found, _ = s.GetItem(tx, "R", "p1", "missing")
+	_, _, found, _ = s.GetItem(tx, "R", "p1", "missing")
 	if found {
 		t.Error("missing range returned found=true")
 	}

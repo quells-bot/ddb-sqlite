@@ -23,6 +23,7 @@ const (
 type expressionRequest struct {
 	Condition string
 	Update    string
+	Filter    string
 	Names     map[string]string
 	Values    map[string]attrval.Value
 }
@@ -32,6 +33,7 @@ type expressionRequest struct {
 type preparedExpressions struct {
 	Cond   *expr.BoundCondition
 	Update *expr.BoundUpdate
+	Filter *expr.BoundCondition
 }
 
 // prepareExpressions parses every expression on the request, validates the
@@ -50,6 +52,7 @@ func prepareExpressions(r expressionRequest) (preparedExpressions, error) {
 
 	var cond *expr.Condition
 	var upd *expr.Update
+	var filter *expr.Condition
 	var names, values []string
 
 	if r.Condition != "" {
@@ -72,6 +75,16 @@ func prepareExpressions(r expressionRequest) (preparedExpressions, error) {
 		names = append(names, un...)
 		values = append(values, uv...)
 	}
+	if r.Filter != "" {
+		f, err := expr.ParseCondition(r.Filter)
+		if err != nil {
+			return out, fmt.Errorf("%w: FilterExpression: %v", ErrValidation, err)
+		}
+		filter = f
+		fn, fv := f.Refs()
+		names = append(names, fn...)
+		values = append(values, fv...)
+	}
 
 	if err := expr.CheckUnused(env, names, values); err != nil {
 		return out, fmt.Errorf("%w: %v", ErrValidation, err)
@@ -90,6 +103,13 @@ func prepareExpressions(r expressionRequest) (preparedExpressions, error) {
 			return out, fmt.Errorf("%w: UpdateExpression: %v", ErrValidation, err)
 		}
 		out.Update = b
+	}
+	if filter != nil {
+		b, err := filter.Bind(env)
+		if err != nil {
+			return out, fmt.Errorf("%w: FilterExpression: %v", ErrValidation, err)
+		}
+		out.Filter = b
 	}
 	return out, nil
 }

@@ -77,21 +77,22 @@ func (s *Store) PutItem(tx *sql.Tx, table string, hashVal, rangeVal any, data []
 	return nil
 }
 
-// GetItem returns the item blob for the key. found is false (no error) if absent.
-func (s *Store) GetItem(tx *sql.Tx, table string, hashVal, rangeVal any) (data []byte, found bool, err error) {
+// GetItem returns the item blob for the key, along with its rowid. found is
+// false (no error) if absent.
+func (s *Store) GetItem(tx *sql.Tx, table string, hashVal, rangeVal any) (id int64, data []byte, found bool, err error) {
 	tbl := TableName(table)
 	var row *sql.Row
 	if rangeVal == nil {
-		row = tx.QueryRow(`SELECT data FROM `+tbl+` WHERE hash = ?`, hashVal)
+		row = tx.QueryRow(`SELECT id, data FROM `+tbl+` WHERE hash = ?`, hashVal)
 	} else {
-		row = tx.QueryRow(`SELECT data FROM `+tbl+` WHERE hash = ? AND range = ?`, hashVal, rangeVal)
+		row = tx.QueryRow(`SELECT id, data FROM `+tbl+` WHERE hash = ? AND range = ?`, hashVal, rangeVal)
 	}
-	if err := row.Scan(&data); err == sql.ErrNoRows {
-		return nil, false, nil
+	if err := row.Scan(&id, &data); err == sql.ErrNoRows {
+		return 0, nil, false, nil
 	} else if err != nil {
-		return nil, false, fmt.Errorf("storage: get item %q: %w", table, err)
+		return 0, nil, false, fmt.Errorf("storage: get item %q: %w", table, err)
 	}
-	return data, true, nil
+	return id, data, true, nil
 }
 
 // DeleteItem deletes the item for the key. found is false (no error) if the key

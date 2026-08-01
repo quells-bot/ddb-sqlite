@@ -65,6 +65,8 @@ func mapError(err error) error {
 		return &types.ResourceNotFoundException{Message: aws.String(err.Error())}
 	case errors.Is(err, ddb.ErrTableInUse):
 		return &types.ResourceInUseException{Message: aws.String(err.Error())}
+	case errors.Is(err, ddb.ErrGsiNotFound):
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: err.Error()}
 	case errors.Is(err, ddb.ErrValidation):
 		// DynamoDB has no generated ValidationException type; real DynamoDB
 		// surfaces 400/validation failures as a generic API error carrying the
