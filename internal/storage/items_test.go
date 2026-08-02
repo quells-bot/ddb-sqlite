@@ -16,7 +16,7 @@ func TestPutGetDeleteItem(t *testing.T) {
 	s.CreateDataTable(tx, dataDef())
 
 	blob := []byte("hello")
-	if err := s.PutItem(tx, "T", "k1", nil, blob); err != nil {
+	if _, err := s.PutItem(tx, "T", "k1", nil, blob); err != nil {
 		t.Fatalf("PutItem: %v", err)
 	}
 	_, got, found, err := s.GetItem(tx, "T", "k1", nil)

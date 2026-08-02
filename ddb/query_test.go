@@ -13,30 +13,38 @@ import (
 func TestValidateSelect(t *testing.T) {
 	cases := []struct {
 		in      string
+		gsiProj string
 		want    string
 		wantErr bool
 	}{
-		{"", "ALL_ATTRIBUTES", false},
-		{"ALL_ATTRIBUTES", "ALL_ATTRIBUTES", false},
-		{"COUNT", "COUNT", false},
-		{"SPECIFIC_ATTRIBUTES", "", true},
-		{"ALL_PROJECTED_ATTRIBUTES", "", true},
-		{"count", "", true}, // case-sensitive
+		{"", "", "ALL_ATTRIBUTES", false},
+		{"", "KEYS_ONLY", "ALL_PROJECTED_ATTRIBUTES", false},
+		{"", "INCLUDE", "ALL_PROJECTED_ATTRIBUTES", false},
+		{"", "ALL", "ALL_ATTRIBUTES", false},
+		{"ALL_ATTRIBUTES", "", "ALL_ATTRIBUTES", false},
+		{"ALL_ATTRIBUTES", "KEYS_ONLY", "", true}, // non-ALL GSI -> err
+		{"ALL_ATTRIBUTES", "ALL", "ALL_ATTRIBUTES", false},
+		{"ALL_PROJECTED_ATTRIBUTES", "", "", true}, // base table -> err
+		{"ALL_PROJECTED_ATTRIBUTES", "KEYS_ONLY", "ALL_PROJECTED_ATTRIBUTES", false},
+		{"ALL_PROJECTED_ATTRIBUTES", "ALL", "ALL_PROJECTED_ATTRIBUTES", false},
+		{"COUNT", "", "COUNT", false},
+		{"SPECIFIC_ATTRIBUTES", "", "", true},
+		{"count", "", "", true}, // case-sensitive
 	}
 	for _, tc := range cases {
-		t.Run(tc.in, func(t *testing.T) {
-			got, err := validateSelect(tc.in)
+		t.Run(tc.in+"/"+tc.gsiProj, func(t *testing.T) {
+			got, err := validateSelect(tc.in, tc.gsiProj)
 			if tc.wantErr {
 				if !errors.Is(err, ErrValidation) {
-					t.Errorf("validateSelect(%q): err = %v, want ErrValidation", tc.in, err)
+					t.Errorf("validateSelect(%q,%q): err = %v, want ErrValidation", tc.in, tc.gsiProj, err)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("validateSelect(%q): %v", tc.in, err)
+				t.Fatalf("validateSelect(%q,%q): %v", tc.in, tc.gsiProj, err)
 			}
 			if got != tc.want {
-				t.Errorf("validateSelect(%q) = %q, want %q", tc.in, got, tc.want)
+				t.Errorf("validateSelect(%q,%q) = %q, want %q", tc.in, tc.gsiProj, got, tc.want)
 			}
 		})
 	}

@@ -152,3 +152,148 @@ func TestDeleteTableMissing(t *testing.T) {
 		t.Errorf("err = %v, want ErrTableNotFound", err)
 	}
 }
+
+func TestCreateTableWithGSI(t *testing.T) {
+	c := newClient(t)
+	ctx := context.Background()
+	desc, err := c.CreateTable(ctx, CreateTableInput{
+		TableName: "Music",
+		KeySchema: []KeySchemaElement{
+			{AttributeName: "pk", KeyType: "HASH"},
+			{AttributeName: "sk", KeyType: "RANGE"},
+		},
+		AttributeDefinitions: []AttributeDefinition{
+			{AttributeName: "pk", AttributeType: "S"},
+			{AttributeName: "sk", AttributeType: "S"},
+			{AttributeName: "gsi_pk", AttributeType: "S"},
+			{AttributeName: "gsi_sk", AttributeType: "S"},
+		},
+		GlobalSecondaryIndexes: []GlobalSecondaryIndex{
+			{
+				IndexName: "gsi-all",
+				KeySchema: []KeySchemaElement{
+					{AttributeName: "gsi_pk", KeyType: "HASH"},
+					{AttributeName: "gsi_sk", KeyType: "RANGE"},
+				},
+				Projection: Projection{Type: "ALL"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateTable with GSI: %v", err)
+	}
+	if len(desc.GlobalSecondaryIndexes) != 1 {
+		t.Fatalf("desc GSIs = %d, want 1", len(desc.GlobalSecondaryIndexes))
+	}
+	if desc.GlobalSecondaryIndexes[0].IndexName != "gsi-all" {
+		t.Errorf("GSI name = %q, want gsi-all", desc.GlobalSecondaryIndexes[0].IndexName)
+	}
+
+	// DescribeTable returns the GSI too.
+	d, err := c.DescribeTable(ctx, DescribeTableInput{TableName: "Music"})
+	if err != nil {
+		t.Fatalf("DescribeTable: %v", err)
+	}
+	if len(d.GlobalSecondaryIndexes) != 1 {
+		t.Fatalf("describe GSIs = %d, want 1", len(d.GlobalSecondaryIndexes))
+	}
+}
+
+func TestCreateTableDuplicateAttrDef(t *testing.T) {
+	c := newClient(t)
+	ctx := context.Background()
+	_, err := c.CreateTable(ctx, CreateTableInput{
+		TableName: "T",
+		KeySchema: []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
+		AttributeDefinitions: []AttributeDefinition{
+			{AttributeName: "pk", AttributeType: "S"},
+			{AttributeName: "pk", AttributeType: "S"},
+		},
+	})
+	if !errors.Is(err, ErrValidation) {
+		t.Errorf("duplicate AttributeDefinition: err = %v, want ErrValidation", err)
+	}
+}
+
+func TestCreateTableGSIValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		gsi  GlobalSecondaryIndex
+	}{
+		{"bad name chars", GlobalSecondaryIndex{
+			IndexName:  "bad name",
+			KeySchema:  []KeySchemaElement{{AttributeName: "g", KeyType: "HASH"}},
+			Projection: Projection{Type: "ALL"},
+		}},
+		{"name too short", GlobalSecondaryIndex{
+			IndexName:  "ab",
+			KeySchema:  []KeySchemaElement{{AttributeName: "g", KeyType: "HASH"}},
+			Projection: Projection{Type: "ALL"},
+		}},
+		{"missing gsi attr def", GlobalSecondaryIndex{
+			IndexName:  "ok-name",
+			KeySchema:  []KeySchemaElement{{AttributeName: "nope", KeyType: "HASH"}},
+			Projection: Projection{Type: "ALL"},
+		}},
+		{"ALL with NonKeyAttributes", GlobalSecondaryIndex{
+			IndexName:  "ok-name",
+			KeySchema:  []KeySchemaElement{{AttributeName: "g", KeyType: "HASH"}},
+			Projection: Projection{Type: "ALL", NonKeyAttributes: []string{"x"}},
+		}},
+		{"INCLUDE names key attr", GlobalSecondaryIndex{
+			IndexName:  "ok-name",
+			KeySchema:  []KeySchemaElement{{AttributeName: "g", KeyType: "HASH"}},
+			Projection: Projection{Type: "INCLUDE", NonKeyAttributes: []string{"g"}},
+		}},
+		{"two HASH", GlobalSecondaryIndex{
+			IndexName: "ok-name",
+			KeySchema: []KeySchemaElement{
+				{AttributeName: "g", KeyType: "HASH"},
+				{AttributeName: "h", KeyType: "HASH"},
+			},
+			Projection: Projection{Type: "ALL"},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newClient(t)
+			ctx := context.Background()
+			_, err := c.CreateTable(ctx, CreateTableInput{
+				TableName: "T",
+				KeySchema: []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
+				AttributeDefinitions: []AttributeDefinition{
+					{AttributeName: "pk", AttributeType: "S"},
+					{AttributeName: "g", AttributeType: "S"},
+					{AttributeName: "h", AttributeType: "S"},
+				},
+				GlobalSecondaryIndexes: []GlobalSecondaryIndex{tc.gsi},
+			})
+			if !errors.Is(err, ErrValidation) {
+				t.Errorf("err = %v, want ErrValidation", err)
+			}
+		})
+	}
+}
+
+func TestCreateTableGSIOverlappingKey(t *testing.T) {
+	// GSI partition key = table partition key. Valid.
+	c := newClient(t)
+	ctx := context.Background()
+	_, err := c.CreateTable(ctx, CreateTableInput{
+		TableName: "T",
+		KeySchema: []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
+		AttributeDefinitions: []AttributeDefinition{
+			{AttributeName: "pk", AttributeType: "S"},
+		},
+		GlobalSecondaryIndexes: []GlobalSecondaryIndex{
+			{
+				IndexName:  "pk-index",
+				KeySchema:  []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
+				Projection: Projection{Type: "KEYS_ONLY"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("overlapping key: %v", err)
+	}
+}

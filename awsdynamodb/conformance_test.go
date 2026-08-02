@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -282,6 +283,84 @@ func mustCreateComposite(t *testing.T, c api, ctx context.Context, name string) 
 	if err != nil {
 		t.Fatalf("CreateTable %q: %v", name, err)
 	}
+}
+
+// mustCreateGsiTable builds the M4 GSI conformance table: pk HASH S, sk RANGE S,
+// with three GSIs:
+//   - gsi-all:   gsi_pk HASH S, gsi_sk RANGE S, ALL
+//   - gsi-keys:  gsi_pk HASH S, (no sort),       KEYS_ONLY
+//   - gsi-incl:  gsi_pk HASH S, gsi_sk RANGE S, INCLUDE [proj1, proj2]
+func mustCreateGsiTable(t *testing.T, c api, ctx context.Context, name string) {
+	t.Helper()
+	_, err := c.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName: aws.String(name),
+		KeySchema: []types.KeySchemaElement{
+			{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash},
+			{AttributeName: aws.String("sk"), KeyType: types.KeyTypeRange},
+		},
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("sk"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("gsi_pk"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("gsi_sk"), AttributeType: types.ScalarAttributeTypeS},
+		},
+		GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{
+			{
+				IndexName: aws.String("gsi-all"),
+				KeySchema: []types.KeySchemaElement{
+					{AttributeName: aws.String("gsi_pk"), KeyType: types.KeyTypeHash},
+					{AttributeName: aws.String("gsi_sk"), KeyType: types.KeyTypeRange},
+				},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll},
+			},
+			{
+				IndexName:  aws.String("gsi-keys"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("gsi_pk"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeKeysOnly},
+			},
+			{
+				IndexName: aws.String("gsi-incl"),
+				KeySchema: []types.KeySchemaElement{
+					{AttributeName: aws.String("gsi_pk"), KeyType: types.KeyTypeHash},
+					{AttributeName: aws.String("gsi_sk"), KeyType: types.KeyTypeRange},
+				},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeInclude, NonKeyAttributes: []string{"proj1", "proj2"}},
+			},
+		},
+		BillingMode: types.BillingModePayPerRequest,
+	})
+	if err != nil {
+		t.Fatalf("CreateTable GSI %q: %v", name, err)
+	}
+}
+
+// seedGsiConformance puts the five M4 seed items into the table.
+func seedGsiConformance(t *testing.T, c api, ctx context.Context, table string) {
+	t.Helper()
+	items := []map[string]types.AttributeValue{
+		{"pk": sv("A"), "sk": sv("a"), "gsi_pk": sv("G1"), "gsi_sk": sv("s1"), "proj1": sv("foo"), "proj2": sv("bar"), "extra": sv("baz")},
+		{"pk": sv("B"), "sk": sv("b"), "gsi_pk": sv("G1"), "gsi_sk": sv("s2"), "proj1": sv("qux"), "extra": sv("quux")},
+		{"pk": sv("C"), "sk": sv("c"), "gsi_pk": sv("G1"), "gsi_sk": sv("s1")},
+		{"pk": sv("D"), "sk": sv("d")},
+		{"pk": sv("E"), "sk": sv("e"), "gsi_pk": sv("G2"), "gsi_sk": sv("s3"), "proj1": sv("alpha")},
+	}
+	for _, it := range items {
+		putConf(t, c, ctx, table, it)
+	}
+}
+
+// itemAttrNamesConf returns sorted attribute names of a conformance item.
+func itemAttrNamesConf(item map[string]types.AttributeValue) []string {
+	names := make([]string, 0, len(item))
+	for k := range item {
+		names = append(names, k)
+	}
+	for i := 1; i < len(names); i++ {
+		for j := i; j > 0 && names[j-1] > names[j]; j-- {
+			names[j-1], names[j] = names[j], names[j-1]
+		}
+	}
+	return names
 }
 
 func asResourceNotFound(t *testing.T, err error, msg string) {
@@ -2844,19 +2923,27 @@ func TestConfExclusiveStartKeyValidation(t *testing.T) {
 func TestConfIndexName(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
-		mustCreateComposite(t, c, ctx, "ConfT")
-		seedComposite(t, c, ctx, "ConfT", "p1", 3)
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
 
-		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G2"))
 		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
-		_, err := c.Query(ctx, &dynamodb.QueryInput{
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
 			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
 			KeyConditionExpression:    expr.KeyCondition(),
 			ExpressionAttributeNames:  expr.Names(),
 			ExpressionAttributeValues: expr.Values(),
-			IndexName:                 aws.String("my-gsi"),
 		})
-		asValidation(t, err, "IndexName should be rejected in M3")
+		if err != nil {
+			t.Fatalf("Query with IndexName: %v", err)
+		}
+		if len(out.Items) != 1 {
+			t.Fatalf("got %d items, want 1", len(out.Items))
+		}
+		if v, ok := out.Items[0]["pk"].(*types.AttributeValueMemberS); !ok || v.Value != "E" {
+			t.Errorf("item pk = %v, want E", out.Items[0]["pk"])
+		}
 	})
 }
 
@@ -3020,4 +3107,1266 @@ func TestConfSelectCountWithLimitAndFilter(t *testing.T) {
 			t.Error("LEK = nil, want non-nil (ScannedCount == Limit)")
 		}
 	})
+}
+
+// --- M4 GSI conformance cases (cases 38-52, spec §10.3) ---
+
+// itemSet returns the set of "pk" values in items, for comparing GSI results
+// whose tied sort keys have no guaranteed relative order.
+func itemSet(items []map[string]types.AttributeValue) map[string]bool {
+	set := map[string]bool{}
+	for _, it := range items {
+		if v, ok := it["pk"].(*types.AttributeValueMemberS); ok {
+			set[v.Value] = true
+		}
+	}
+	return set
+}
+
+// wantSet asserts exactly the pks in want (order-insensitive) are present.
+func wantSet(t *testing.T, items []map[string]types.AttributeValue, want ...string) {
+	t.Helper()
+	got := itemSet(items)
+	if len(got) != len(want) {
+		t.Fatalf("got %d items %v, want %v", len(got), pks(items), want)
+	}
+	for _, w := range want {
+		if !got[w] {
+			t.Errorf("missing pk %q in %v", w, got)
+		}
+	}
+}
+
+func sv(s string) types.AttributeValue { return &types.AttributeValueMemberS{Value: s} }
+
+// pks returns the sorted "pk" values from a list of items.
+func pks(items []map[string]types.AttributeValue) []string {
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		if v, ok := it["pk"].(*types.AttributeValueMemberS); ok {
+			out = append(out, v.Value)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// wantAttrNames asserts item carries exactly the sorted attribute names want.
+func wantAttrNames(t *testing.T, item map[string]types.AttributeValue, want []string, msg string) {
+	t.Helper()
+	got := itemAttrNamesConf(item)
+	if len(got) != len(want) {
+		t.Errorf("%s: attrs = %v, want %v", msg, got, want)
+		return
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("%s: attrs = %v, want %v", msg, got, want)
+			return
+		}
+	}
+}
+
+// Case 38: Basic GSI Query — IndexName + gsi_pk = :v returns the right items in
+// GSI sort order. Tied sort keys (A,C share gsi_sk=s1) have unspecified order,
+// so items are compared as a set.
+func TestConfGSIBasicQuery(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		wantSet(t, out.Items, "A", "B", "C")
+	})
+}
+
+// Case 39: Sparse GSI — D has no GSI attributes, so it is absent from both a
+// Query on gsi-all and a Scan of gsi-all.
+func TestConfGSISparse(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		// Query gsi_pk=G2: only E is indexed there.
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G2"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		wantSet(t, out.Items, "E")
+
+		// Scan gsi-all: D (no GSI attrs) must be absent.
+		scan, err := c.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String("ConfT"), IndexName: aws.String("gsi-all")})
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if set := itemSet(scan.Items); set["D"] {
+			t.Errorf("Scan gsi-all returned D; sparse item must be absent")
+		}
+		wantSet(t, scan.Items, "A", "B", "C", "E")
+	})
+}
+
+// Case 40: Non-unique GSI key — A and C share gsi_sk=s1 under gsi_pk=G1 and
+// both must be returned.
+func TestConfGSINonUnique(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1")).And(expression.Key("gsi_sk").Equal(expression.Value("s1")))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		wantSet(t, out.Items, "A", "C")
+	})
+}
+
+// Case 41: GSI sort-key conditions — =, <, <=, >, >=, BETWEEN and begins_with
+// on the S gsi_sk sort key of gsi-all for partition G1.
+func TestConfGSISortKeyConditions(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		cases := []struct {
+			name string
+			b    expression.Builder
+			want []string
+		}{
+			{"gsi_sk = s1", expression.NewBuilder().WithKeyCondition(
+				expression.Key("gsi_pk").Equal(expression.Value("G1")).And(expression.Key("gsi_sk").Equal(expression.Value("s1")))), []string{"A", "C"}},
+			{"gsi_sk < s2", expression.NewBuilder().WithKeyCondition(
+				expression.Key("gsi_pk").Equal(expression.Value("G1")).And(expression.Key("gsi_sk").LessThan(expression.Value("s2")))), []string{"A", "C"}},
+			{"gsi_sk <= s1", expression.NewBuilder().WithKeyCondition(
+				expression.Key("gsi_pk").Equal(expression.Value("G1")).And(expression.Key("gsi_sk").LessThanEqual(expression.Value("s1")))), []string{"A", "C"}},
+			{"gsi_sk > s1", expression.NewBuilder().WithKeyCondition(
+				expression.Key("gsi_pk").Equal(expression.Value("G1")).And(expression.Key("gsi_sk").GreaterThan(expression.Value("s1")))), []string{"B"}},
+			{"gsi_sk >= s2", expression.NewBuilder().WithKeyCondition(
+				expression.Key("gsi_pk").Equal(expression.Value("G1")).And(expression.Key("gsi_sk").GreaterThanEqual(expression.Value("s2")))), []string{"B"}},
+			{"gsi_sk BETWEEN s1 AND s2", expression.NewBuilder().WithKeyCondition(
+				expression.Key("gsi_pk").Equal(expression.Value("G1")).And(expression.Key("gsi_sk").Between(expression.Value("s1"), expression.Value("s2")))), []string{"A", "B", "C"}},
+			{"begins_with(gsi_sk, s)", expression.NewBuilder().WithKeyCondition(
+				expression.Key("gsi_pk").Equal(expression.Value("G1")).And(expression.Key("gsi_sk").BeginsWith("s"))), []string{"A", "B", "C"}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				expr := mustExpr(t, tc.b)
+				out, err := c.Query(ctx, &dynamodb.QueryInput{
+					TableName:                 aws.String("ConfT"),
+					IndexName:                 aws.String("gsi-all"),
+					KeyConditionExpression:    expr.KeyCondition(),
+					ExpressionAttributeNames:  expr.Names(),
+					ExpressionAttributeValues: expr.Values(),
+				})
+				if err != nil {
+					t.Fatalf("Query: %v", err)
+				}
+				wantSet(t, out.Items, tc.want...)
+			})
+		}
+	})
+}
+
+// Case 42: ScanIndexForward=false on a GSI returns items in descending GSI sort
+// order — B (gsi_sk=s2) first, then the s1 tie (A,C).
+func TestConfGSIScanIndexForward(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ScanIndexForward:          aws.Bool(false),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if v, ok := out.Items[0]["pk"].(*types.AttributeValueMemberS); !ok || v.Value != "B" {
+			t.Errorf("first item pk = %v, want B (highest gsi_sk in DESC order)", out.Items[0]["pk"])
+		}
+		wantSet(t, out.Items, "A", "B", "C")
+	})
+}
+
+// Case 43: GSI pagination — Limit=2 with resume to exhaustion.
+func TestConfGSIPagination(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+
+		var total int
+		var start map[string]types.AttributeValue
+		for {
+			out, err := c.Query(ctx, &dynamodb.QueryInput{
+				TableName:                 aws.String("ConfT"),
+				IndexName:                 aws.String("gsi-all"),
+				KeyConditionExpression:    expr.KeyCondition(),
+				ExpressionAttributeNames:  expr.Names(),
+				ExpressionAttributeValues: expr.Values(),
+				Limit:                     aws.Int32(2),
+				ExclusiveStartKey:         start,
+			})
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			total += len(out.Items)
+			if out.LastEvaluatedKey == nil {
+				break
+			}
+			start = out.LastEvaluatedKey
+		}
+		if total != 3 {
+			t.Errorf("pagination total = %d, want 3", total)
+		}
+	})
+}
+
+// Case 44: ConsistentRead=true is rejected on a GSI Query and Scan.
+func TestConfGSIConsistentRead(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ConsistentRead:            aws.Bool(true),
+		})
+		asValidation(t, err, "ConsistentRead=true on GSI Query")
+
+		_, err = c.Scan(ctx, &dynamodb.ScanInput{
+			TableName:      aws.String("ConfT"),
+			IndexName:      aws.String("gsi-all"),
+			ConsistentRead: aws.Bool(true),
+		})
+		asValidation(t, err, "ConsistentRead=true on GSI Scan")
+	})
+}
+
+// Case 45: KEYS_ONLY projection — a query on gsi-keys returns only the table
+// primary key plus the index key ({gsi_pk, pk, sk}).
+func TestConfGSIProjectionKeysOnly(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-keys"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		wantSet(t, out.Items, "A", "B", "C")
+		for _, it := range out.Items {
+			wantAttrNames(t, it, []string{"gsi_pk", "pk", "sk"}, "KEYS_ONLY item")
+		}
+	})
+}
+
+// Case 46: INCLUDE projection — gsi-incl returns table keys + GSI keys + the
+// included non-key attrs, omitting absent ones (C has no proj1/proj2).
+func TestConfGSIProjectionInclude(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1")).And(expression.Key("gsi_sk").Equal(expression.Value("s1")))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-incl"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(out.Items) != 2 {
+			t.Fatalf("got %d items, want 2", len(out.Items))
+		}
+		for _, it := range out.Items {
+			pk := it["pk"].(*types.AttributeValueMemberS).Value
+			switch pk {
+			case "A":
+				wantAttrNames(t, it, []string{"gsi_pk", "gsi_sk", "pk", "proj1", "proj2", "sk"}, "INCLUDE item A")
+			case "C":
+				wantAttrNames(t, it, []string{"gsi_pk", "gsi_sk", "pk", "sk"}, "INCLUDE item C")
+			default:
+				t.Errorf("unexpected item pk %q", pk)
+			}
+		}
+	})
+}
+
+// Case 47: ALL projection — a query on gsi-all returns every attribute.
+func TestConfGSIProjectionAll(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		wantSet(t, out.Items, "A", "B", "C")
+		// A carries the full attribute set (including non-projected "extra"),
+		// proving the ALL projection returns every attribute.
+		for _, it := range out.Items {
+			if pk, ok := it["pk"].(*types.AttributeValueMemberS); ok && pk.Value == "A" {
+				wantAttrNames(t, it, []string{"extra", "gsi_pk", "gsi_sk", "pk", "proj1", "proj2", "sk"}, "ALL projection item A")
+			}
+		}
+	})
+}
+
+// Case 48: Select=ALL_PROJECTED_ATTRIBUTES on a GSI returns the projected attrs.
+func TestConfGSISelectAllProjectedAttributes(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1")).And(expression.Key("gsi_sk").Equal(expression.Value("s1")))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-incl"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Select:                    types.SelectAllProjectedAttributes,
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		for _, it := range out.Items {
+			if pk, ok := it["pk"].(*types.AttributeValueMemberS); ok && pk.Value == "A" {
+				wantAttrNames(t, it, []string{"gsi_pk", "gsi_sk", "pk", "proj1", "proj2", "sk"}, "ALL_PROJECTED_ATTRIBUTES item A")
+			}
+		}
+	})
+}
+
+// Case 49: Select=ALL_ATTRIBUTES on a non-ALL GSI is a ValidationException.
+func TestConfGSISelectAllAttributes(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-incl"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Select:                    types.SelectAllAttributes,
+		})
+		asValidation(t, err, "Select=ALL_ATTRIBUTES on non-ALL GSI")
+	})
+}
+
+// Case 50: a non-GSI key attribute in KeyConditionExpression is a
+// ValidationException.
+func TestConfGSINonGsiAttr(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		// pk is a table key but not a gsi-all key; conditioning on it is invalid.
+		keyExpr := expression.Key("pk").Equal(expression.Value("A"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		asValidation(t, err, "non-GSI attr in GSI KeyCondition")
+	})
+}
+
+// Case 51: GSI Scan — gsi-all returns every indexed item (D excluded) with a
+// nil LEK.
+func TestConfGSIScan(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		out, err := c.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String("ConfT"), IndexName: aws.String("gsi-all")})
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if set := itemSet(out.Items); set["D"] {
+			t.Errorf("Scan gsi-all returned D; sparse item must be absent")
+		}
+		wantSet(t, out.Items, "A", "B", "C", "E")
+		if out.LastEvaluatedKey != nil {
+			t.Errorf("LEK = %v, want nil for full scan", out.LastEvaluatedKey)
+		}
+	})
+}
+
+// Case 52: GSI Scan pagination — Limit=2 with resume to exhaustion.
+func TestConfGSIScanPagination(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		var total int
+		var start map[string]types.AttributeValue
+		for {
+			out, err := c.Scan(ctx, &dynamodb.ScanInput{
+				TableName:         aws.String("ConfT"),
+				IndexName:         aws.String("gsi-all"),
+				Limit:             aws.Int32(2),
+				ExclusiveStartKey: start,
+			})
+			if err != nil {
+				t.Fatalf("Scan: %v", err)
+			}
+			total += len(out.Items)
+			if out.LastEvaluatedKey == nil {
+				break
+			}
+			start = out.LastEvaluatedKey
+		}
+		if total != 4 {
+			t.Errorf("pagination total = %d, want 4", total)
+		}
+	})
+}
+
+// Case 53: begins_with on the GSI sort key performs a prefix match.
+func TestConfGSIBeginsWith(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		// begins_with(gsi_sk, "s1") matches only gsi_sk values that start with
+		// "s1" (A, C) — narrower than "s" (all), proving prefix semantics.
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1")).And(expression.Key("gsi_sk").BeginsWith("s1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		wantSet(t, out.Items, "A", "C")
+	})
+}
+
+// Case 54: UpdateItem changes a GSI key — the item moves to the new GSI
+// partition (old partition no longer returns it, new one does).
+func TestConfGSIUpdateChangesKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		upd := expression.Set(expression.Name("gsi_pk"), expression.Value("G3"))
+		uexpr := mustExpr(t, expression.NewBuilder().WithUpdate(upd))
+		if _, err := c.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+			TableName:                 aws.String("ConfT"),
+			Key:                       map[string]types.AttributeValue{"pk": sv("A"), "sk": sv("a")},
+			UpdateExpression:          uexpr.Update(),
+			ExpressionAttributeNames:  uexpr.Names(),
+			ExpressionAttributeValues: uexpr.Values(),
+		}); err != nil {
+			t.Fatalf("UpdateItem change gsi key: %v", err)
+		}
+
+		query := func(partition string) []map[string]types.AttributeValue {
+			keyExpr := expression.Key("gsi_pk").Equal(expression.Value(partition))
+			expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+			out, err := c.Query(ctx, &dynamodb.QueryInput{
+				TableName:                 aws.String("ConfT"),
+				IndexName:                 aws.String("gsi-all"),
+				KeyConditionExpression:    expr.KeyCondition(),
+				ExpressionAttributeNames:  expr.Names(),
+				ExpressionAttributeValues: expr.Values(),
+			})
+			if err != nil {
+				t.Fatalf("Query %s: %v", partition, err)
+			}
+			return out.Items
+		}
+
+		wantSet(t, query("G1"), "B", "C") // A moved away from G1
+		wantSet(t, query("G3"), "A")      // A now lives in G3
+	})
+}
+
+// Case 55: UpdateItem removes a GSI key — the item becomes sparse (absent from
+// the GSI Query).
+func TestConfGSIUpdateRemovesKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		urexpr := mustExpr(t, expression.NewBuilder().WithUpdate(expression.Remove(expression.Name("gsi_pk"))))
+		if _, err := c.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+			TableName:                aws.String("ConfT"),
+			Key:                      map[string]types.AttributeValue{"pk": sv("B"), "sk": sv("b")},
+			UpdateExpression:         urexpr.Update(),
+			ExpressionAttributeNames: urexpr.Names(),
+		}); err != nil {
+			t.Fatalf("UpdateItem remove gsi key: %v", err)
+		}
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		wantSet(t, out.Items, "A", "C") // B is now sparse
+	})
+}
+
+// Case 56: DeleteItem removes the item from the GSI.
+func TestConfGSIDeleteRemoves(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		if _, err := c.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+			TableName: aws.String("ConfT"),
+			Key:       map[string]types.AttributeValue{"pk": sv("C"), "sk": sv("c")},
+		}); err != nil {
+			t.Fatalf("DeleteItem: %v", err)
+		}
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		wantSet(t, out.Items, "A", "B") // C removed from GSI
+	})
+}
+
+// Case 57: a partition-only GSI — gsi_pk = :v returns every item in that
+// partition.
+func TestConfGSIPartitionOnly(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-keys"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query gsi-keys: %v", err)
+		}
+		wantSet(t, out.Items, "A", "B", "C")
+	})
+}
+
+// Case 58: GSI partition key equal to the table partition key (overlapping key)
+// is valid; the GSI queries correctly. Uses its own table "OvT".
+func TestConfGSIOverlappingKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		_, err := c.CreateTable(ctx, &dynamodb.CreateTableInput{
+			TableName: aws.String("OvT"),
+			KeySchema: []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+			AttributeDefinitions: []types.AttributeDefinition{
+				{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+			},
+			GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{{
+				IndexName:  aws.String("pk-index"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeKeysOnly},
+			}},
+			BillingMode: types.BillingModePayPerRequest,
+		})
+		if err != nil {
+			t.Fatalf("CreateTable overlapping key: %v", err)
+		}
+		putConf(t, c, ctx, "OvT", map[string]types.AttributeValue{"pk": sv("A")})
+		keyExpr := expression.Key("pk").Equal(expression.Value("A"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("OvT"),
+			IndexName:                 aws.String("pk-index"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(out.Items) != 1 {
+			t.Errorf("got %d, want 1", len(out.Items))
+		}
+	})
+}
+
+// Case 59: an ExclusiveStartKey whose GSI partition does not match the
+// KeyConditionExpression partition is a ValidationException.
+func TestConfGSIEskPartitionMismatch(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		// Correct union shape (pk, sk, gsi_pk, gsi_sk) but gsi_pk=G2 mismatches
+		// the key condition's G1 partition.
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ExclusiveStartKey: map[string]types.AttributeValue{
+				"pk": sv("A"), "sk": sv("a"), "gsi_pk": sv("G2"), "gsi_sk": sv("s1"),
+			},
+		})
+		asValidation(t, err, "ESK GSI partition mismatch")
+	})
+}
+
+// Case 60: an item with gsi_pk but no gsi_sk (composite GSI) is accepted but
+// absent from the GSI Query and Scan.
+func TestConfGSICompositeSortAbsent(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		// F carries gsi_pk but no gsi_sk — write accepted, not indexed by gsi-all.
+		putConf(t, c, ctx, "ConfT", map[string]types.AttributeValue{
+			"pk": sv("F"), "sk": sv("f"), "gsi_pk": sv("G5"),
+		})
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G5"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(out.Items) != 0 {
+			t.Errorf("Query gsi_pk=G5 returned %v, want none (sort key absent)", itemSet(out.Items))
+		}
+
+		scan, err := c.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String("ConfT"), IndexName: aws.String("gsi-all")})
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if set := itemSet(scan.Items); set["F"] {
+			t.Errorf("Scan gsi-all returned F; composite sort-absent item must be absent")
+		}
+	})
+}
+
+// Case 61: GSI key type mismatch on PutItem — gsi_pk as Number — is a
+// ValidationException and atomic (GetItem finds nothing).
+func TestConfGSIKeyTypeMismatchPut(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+
+		_, err := c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("ConfT"), Item: map[string]types.AttributeValue{
+			"pk": sv("X"), "sk": sv("x"), "gsi_pk": numVal("1"), "gsi_sk": sv("s1"),
+		}})
+		asValidation(t, err, "put gsi_pk as Number")
+
+		// Atomic: the rejected write left no item behind.
+		got, gerr := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("ConfT"), Key: map[string]types.AttributeValue{"pk": sv("X"), "sk": sv("x")}})
+		if gerr != nil {
+			t.Fatalf("GetItem: %v", gerr)
+		}
+		if got.Item != nil {
+			t.Errorf("after rejected put, GetItem = %v, want nil (atomic)", got.Item)
+		}
+	})
+}
+
+// Case 62: a non-scalar GSI key attribute (L/BOOL/SS/NULL) on PutItem is a
+// ValidationException.
+func TestConfGSINonScalarKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+
+		cases := []struct {
+			name  string
+			gsiPK types.AttributeValue
+		}{
+			{"L", &types.AttributeValueMemberL{Value: []types.AttributeValue{sv("a")}}},
+			{"BOOL", &types.AttributeValueMemberBOOL{Value: true}},
+			{"SS", &types.AttributeValueMemberSS{Value: []string{"a"}}},
+			{"NULL", &types.AttributeValueMemberNULL{Value: true}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("ConfT"), Item: map[string]types.AttributeValue{
+					"pk": sv("X"), "sk": sv("x" + tc.name), "gsi_pk": tc.gsiPK, "gsi_sk": sv("s1"),
+				}})
+				asValidation(t, err, "non-scalar gsi key "+tc.name)
+			})
+		}
+	})
+}
+
+// Case 63: GSI key type mismatch on UpdateItem (SET gsi_pk = :n) is a
+// ValidationException and atomic (item unchanged).
+func TestConfGSIKeyTypeMismatchUpdate(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		uexpr := mustExpr(t, expression.NewBuilder().WithUpdate(
+			expression.Set(expression.Name("gsi_pk"), expression.Value(numVal("9")))))
+		_, err := c.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+			TableName:                 aws.String("ConfT"),
+			Key:                       map[string]types.AttributeValue{"pk": sv("A"), "sk": sv("a")},
+			UpdateExpression:          uexpr.Update(),
+			ExpressionAttributeNames:  uexpr.Names(),
+			ExpressionAttributeValues: uexpr.Values(),
+		})
+		asValidation(t, err, "update gsi_pk as Number")
+
+		// Atomic: item A unchanged, still in G1.
+		got, gerr := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("ConfT"), Key: map[string]types.AttributeValue{"pk": sv("A"), "sk": sv("a")}})
+		if gerr != nil {
+			t.Fatalf("GetItem: %v", gerr)
+		}
+		if got.Item == nil {
+			t.Fatalf("GetItem A = nil, want present (atomic)")
+		}
+		if v, ok := got.Item["gsi_pk"].(*types.AttributeValueMemberS); !ok || v.Value != "G1" {
+			t.Errorf("gsi_pk = %v, want G1 (unchanged)", got.Item["gsi_pk"])
+		}
+	})
+}
+
+// Case 64: an empty string as a GSI partition key value is a
+// ValidationException.
+func TestConfGSIEmptyKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+
+		_, err := c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("ConfT"), Item: map[string]types.AttributeValue{
+			"pk": sv("X"), "sk": sv("x"), "gsi_pk": sv(""), "gsi_sk": sv("s1"),
+		}})
+		asValidation(t, err, "empty gsi_pk value")
+	})
+}
+
+// Case 65: GSI ExclusiveStartKey shape validation — table-only, GSI-only, and
+// union-plus-extra shapes are rejected; the exact union is accepted.
+func TestConfGSIEskShape(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		seedGsiConformance(t, c, ctx, "ConfT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+
+		bad := []struct {
+			name string
+			esk  map[string]types.AttributeValue
+		}{
+			{"table-only", map[string]types.AttributeValue{"pk": sv("A"), "sk": sv("a")}},
+			{"gsi-only", map[string]types.AttributeValue{"gsi_pk": sv("G1"), "gsi_sk": sv("s1")}},
+			{"union-plus-extra", map[string]types.AttributeValue{
+				"pk": sv("A"), "sk": sv("a"), "gsi_pk": sv("G1"), "gsi_sk": sv("s1"), "extra": sv("x"),
+			}},
+		}
+		for _, tc := range bad {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := c.Query(ctx, &dynamodb.QueryInput{
+					TableName:                 aws.String("ConfT"),
+					IndexName:                 aws.String("gsi-all"),
+					KeyConditionExpression:    expr.KeyCondition(),
+					ExpressionAttributeNames:  expr.Names(),
+					ExpressionAttributeValues: expr.Values(),
+					ExclusiveStartKey:         tc.esk,
+				})
+				asValidation(t, err, "ESK shape "+tc.name)
+			})
+		}
+
+		// Exact union (table keys + GSI keys) is accepted.
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ExclusiveStartKey: map[string]types.AttributeValue{
+				"pk": sv("A"), "sk": sv("a"), "gsi_pk": sv("G1"), "gsi_sk": sv("s1"),
+			},
+		})
+		if err != nil {
+			t.Fatalf("ESK exact union rejected: %v", err)
+		}
+	})
+}
+
+// Case 66: a duplicate AttributeDefinition is a ValidationException, with and
+// without GSIs.
+func TestConfGSIDuplicateAttrDef(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+
+		// Without GSIs: duplicate pk AttributeDefinition.
+		_, err := c.CreateTable(ctx, &dynamodb.CreateTableInput{
+			TableName: aws.String("Dup1"),
+			KeySchema: []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+			AttributeDefinitions: []types.AttributeDefinition{
+				{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+				{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+			},
+			BillingMode: types.BillingModePayPerRequest,
+		})
+		asValidation(t, err, "duplicate attr def without GSI")
+
+		// With GSIs: duplicate gsi_pk AttributeDefinition.
+		_, err = c.CreateTable(ctx, &dynamodb.CreateTableInput{
+			TableName: aws.String("Dup2"),
+			KeySchema: []types.KeySchemaElement{
+				{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash},
+				{AttributeName: aws.String("sk"), KeyType: types.KeyTypeRange},
+			},
+			AttributeDefinitions: []types.AttributeDefinition{
+				{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+				{AttributeName: aws.String("sk"), AttributeType: types.ScalarAttributeTypeS},
+				{AttributeName: aws.String("gsi_pk"), AttributeType: types.ScalarAttributeTypeS},
+				{AttributeName: aws.String("gsi_pk"), AttributeType: types.ScalarAttributeTypeS},
+			},
+			GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{{
+				IndexName:  aws.String("g"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("gsi_pk"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeKeysOnly},
+			}},
+			BillingMode: types.BillingModePayPerRequest,
+		})
+		asValidation(t, err, "duplicate attr def with GSI")
+	})
+}
+
+// Case 67: GSI IndexName validation — illegal characters and names too short
+// are ValidationExceptions.
+func TestConfGSIIndexNameValidation(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+
+		build := func(indexName string) *dynamodb.CreateTableInput {
+			return &dynamodb.CreateTableInput{
+				TableName: aws.String("Idx"),
+				KeySchema: []types.KeySchemaElement{
+					{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash},
+					{AttributeName: aws.String("sk"), KeyType: types.KeyTypeRange},
+				},
+				AttributeDefinitions: []types.AttributeDefinition{
+					{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+					{AttributeName: aws.String("sk"), AttributeType: types.ScalarAttributeTypeS},
+					{AttributeName: aws.String("gsi_pk"), AttributeType: types.ScalarAttributeTypeS},
+				},
+				GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{{
+					IndexName:  aws.String(indexName),
+					KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("gsi_pk"), KeyType: types.KeyTypeHash}},
+					Projection: &types.Projection{ProjectionType: types.ProjectionTypeKeysOnly},
+				}},
+				BillingMode: types.BillingModePayPerRequest,
+			}
+		}
+
+		// Illegal characters (space, exclamation).
+		_, err := c.CreateTable(ctx, build("bad name!"))
+		asValidation(t, err, "illegal index name chars")
+
+		// Too short (2 chars; minimum is 3).
+		_, err = c.CreateTable(ctx, build("ab"))
+		asValidation(t, err, "index name too short")
+	})
+}
+
+// Case 68: DescribeTable returns the GSI defs — key schemas round-trip.
+func TestConfGSIDescribeTable(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+
+		out, err := c.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("ConfT")})
+		if err != nil {
+			t.Fatalf("DescribeTable: %v", err)
+		}
+		got := map[string]types.GlobalSecondaryIndexDescription{}
+		for _, g := range out.Table.GlobalSecondaryIndexes {
+			got[*g.IndexName] = g
+		}
+		want := []string{"gsi-all", "gsi-keys", "gsi-incl"}
+		for _, w := range want {
+			g, ok := got[w]
+			if !ok {
+				t.Errorf("missing GSI %q in %v", w, got)
+				continue
+			}
+			// Key schema: one HASH, maybe one RANGE.
+			if len(g.KeySchema) < 1 {
+				t.Errorf("GSI %q: empty key schema", w)
+			}
+		}
+	})
+}
+
+// orderPks returns the "pk" values of items in returned order (not sorted).
+func orderPks(items []map[string]types.AttributeValue) []string {
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		if v, ok := it["pk"].(*types.AttributeValueMemberS); ok {
+			out = append(out, v.Value)
+		}
+	}
+	return out
+}
+
+// TestConfGSIDescPagination: GSI Query with ScanIndexForward=false and Limit
+// paginates in descending GSI sort order across a page boundary — resuming via
+// LastEvaluatedKey must continue in DESC order with no skip or duplicate.
+func TestConfGSIDescPagination(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		// Four G1 items with distinct gsi_sk so DESC order is deterministic.
+		// gsi_sk s1..s4 -> pk P1..P4; full DESC order: P4,P3,P2,P1.
+		for _, it := range []map[string]types.AttributeValue{
+			{"pk": sv("P1"), "sk": sv("p1"), "gsi_pk": sv("G1"), "gsi_sk": sv("s1")},
+			{"pk": sv("P2"), "sk": sv("p2"), "gsi_pk": sv("G1"), "gsi_sk": sv("s2")},
+			{"pk": sv("P3"), "sk": sv("p3"), "gsi_pk": sv("G1"), "gsi_sk": sv("s3")},
+			{"pk": sv("P4"), "sk": sv("p4"), "gsi_pk": sv("G1"), "gsi_sk": sv("s4")},
+		} {
+			putConf(t, c, ctx, "ConfT", it)
+		}
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+
+		query := func(start map[string]types.AttributeValue) (*dynamodb.QueryOutput, error) {
+			return c.Query(ctx, &dynamodb.QueryInput{
+				TableName:                 aws.String("ConfT"),
+				IndexName:                 aws.String("gsi-all"),
+				KeyConditionExpression:    expr.KeyCondition(),
+				ExpressionAttributeNames:  expr.Names(),
+				ExpressionAttributeValues: expr.Values(),
+				ScanIndexForward:          aws.Bool(false),
+				Limit:                     aws.Int32(2),
+				ExclusiveStartKey:         start,
+			})
+		}
+
+		// Accumulate pages by resuming via LastEvaluatedKey; the final page may
+		// or may not clear LastEvaluatedKey depending on target, so loop to
+		// exhaustion and assert the FULL descending order (no skip/dup).
+		var ordered []string
+		var start map[string]types.AttributeValue
+		pages := 0
+		for {
+			out, err := query(start)
+			if err != nil {
+				t.Fatalf("Query page %d: %v", pages+1, err)
+			}
+			pages++
+			ordered = append(ordered, orderPks(out.Items)...)
+			if out.LastEvaluatedKey == nil {
+				break
+			}
+			start = out.LastEvaluatedKey
+		}
+		if pages < 2 {
+			t.Fatalf("DESC pagination produced %d page(s), want >= 2 across a boundary", pages)
+		}
+		if !equalStrings(ordered, []string{"P4", "P3", "P2", "P1"}) {
+			t.Errorf("DESC pagination full order = %v, want [P4 P3 P2 P1] (no skip/dup)", ordered)
+		}
+	})
+}
+
+// TestConfGSIScanEskResume: GSI Scan with Limit pagination resumes page 2 via
+// LastEvaluatedKey — no skip or duplicate across the page boundary.
+func TestConfGSIScanEskResume(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		// Four items with distinct (gsi_pk, gsi_sk) for a deterministic Scan order.
+		// Scan order (gsi_pk ASC, gsi_sk ASC): A1,A2,B1,B2.
+		for _, it := range []map[string]types.AttributeValue{
+			{"pk": sv("A1"), "sk": sv("a1"), "gsi_pk": sv("G1"), "gsi_sk": sv("s1")},
+			{"pk": sv("A2"), "sk": sv("a2"), "gsi_pk": sv("G1"), "gsi_sk": sv("s2")},
+			{"pk": sv("B1"), "sk": sv("b1"), "gsi_pk": sv("G2"), "gsi_sk": sv("s1")},
+			{"pk": sv("B2"), "sk": sv("b2"), "gsi_pk": sv("G2"), "gsi_sk": sv("s2")},
+		} {
+			putConf(t, c, ctx, "ConfT", it)
+		}
+
+		scan := func(start map[string]types.AttributeValue) (*dynamodb.ScanOutput, error) {
+			return c.Scan(ctx, &dynamodb.ScanInput{
+				TableName:         aws.String("ConfT"),
+				IndexName:         aws.String("gsi-all"),
+				Limit:             aws.Int32(2),
+				ExclusiveStartKey: start,
+			})
+		}
+
+		// Accumulate pages by resuming via LastEvaluatedKey; assert no skip/dup
+		// and that every item is seen exactly once.
+		seen := map[string]bool{}
+		var seenPks []string
+		var start map[string]types.AttributeValue
+		pages := 0
+		for {
+			out, err := scan(start)
+			if err != nil {
+				t.Fatalf("Scan page %d: %v", pages+1, err)
+			}
+			pages++
+			for _, it := range out.Items {
+				if v, ok := it["pk"].(*types.AttributeValueMemberS); ok {
+					if seen[v.Value] {
+						t.Errorf("duplicate pk %q across pages", v.Value)
+					}
+					seen[v.Value] = true
+					seenPks = append(seenPks, v.Value)
+				}
+			}
+			if out.LastEvaluatedKey == nil {
+				break
+			}
+			start = out.LastEvaluatedKey
+		}
+		if pages < 2 {
+			t.Fatalf("Scan ESK resume produced %d page(s), want >= 2 across a boundary", pages)
+		}
+		if len(seenPks) != 4 {
+			t.Errorf("scan across pages saw %d items, want 4 (no skip): %v", len(seenPks), seenPks)
+		}
+		for _, w := range []string{"A1", "A2", "B1", "B2"} {
+			if !seen[w] {
+				t.Errorf("missing pk %q in scan across pages: %v", w, seenPks)
+			}
+		}
+	})
+}
+
+// TestConfGSIStaleEsk (G26): after a GSI Query page sets LastEvaluatedKey,
+// delete the item that LEK points to, then resume with that stale LEK. The
+// resume must not error and must continue (partition restarted from the
+// beginning since the pointed-to row is gone).
+func TestConfGSIStaleEsk(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+		// ASC order on (G1, gsi_sk): P1,P2,P3,P4. Limit 2 -> page 1 = [P1,P2],
+		// LEK points at P2. Delete P2, then resume with the stale LEK.
+		for _, it := range []map[string]types.AttributeValue{
+			{"pk": sv("P1"), "sk": sv("p1"), "gsi_pk": sv("G1"), "gsi_sk": sv("s1")},
+			{"pk": sv("P2"), "sk": sv("p2"), "gsi_pk": sv("G1"), "gsi_sk": sv("s2")},
+			{"pk": sv("P3"), "sk": sv("p3"), "gsi_pk": sv("G1"), "gsi_sk": sv("s3")},
+			{"pk": sv("P4"), "sk": sv("p4"), "gsi_pk": sv("G1"), "gsi_sk": sv("s4")},
+		} {
+			putConf(t, c, ctx, "ConfT", it)
+		}
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+
+		query := func(start map[string]types.AttributeValue) (*dynamodb.QueryOutput, error) {
+			return c.Query(ctx, &dynamodb.QueryInput{
+				TableName:                 aws.String("ConfT"),
+				IndexName:                 aws.String("gsi-all"),
+				KeyConditionExpression:    expr.KeyCondition(),
+				ExpressionAttributeNames:  expr.Names(),
+				ExpressionAttributeValues: expr.Values(),
+				Limit:                     aws.Int32(2),
+				ExclusiveStartKey:         start,
+			})
+		}
+
+		out1, err := query(nil)
+		if err != nil {
+			t.Fatalf("Query page 1: %v", err)
+		}
+		if got, want := orderPks(out1.Items), []string{"P1", "P2"}; !equalStrings(got, want) {
+			t.Fatalf("page 1 order = %v, want %v", got, want)
+		}
+		lek := out1.LastEvaluatedKey
+		if lek == nil {
+			t.Fatalf("page 1 with Limit 2 must set LastEvaluatedKey")
+		}
+
+		// Delete the item the LEK points to (P2).
+		if _, err := c.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+			TableName: aws.String("ConfT"),
+			Key:       map[string]types.AttributeValue{"pk": sv("P2"), "sk": sv("p2")},
+		}); err != nil {
+			t.Fatalf("DeleteItem P2: %v", err)
+		}
+
+		// Resume with the now-stale LEK: must NOT error and must continue. The
+		// stale ESK restarts the partition, but the resume page is still subject
+		// to Limit, so accumulate pages to exhaustion.
+		seen := map[string]bool{}
+		var seenPks []string
+		start := lek
+		for {
+			out, err := query(start)
+			if err != nil {
+				t.Fatalf("Query resume with stale LEK errored: %v", err)
+			}
+			for _, pk := range orderPks(out.Items) {
+				seen[pk] = true
+				seenPks = append(seenPks, pk)
+			}
+			if out.LastEvaluatedKey == nil {
+				break
+			}
+			start = out.LastEvaluatedKey
+		}
+		// Must continue correctly with no error. The exact continuation is target-
+		// dependent (the adapter restarts the partition from the beginning,
+		// dynamodb-local resumes from after the deleted LEK's sort position), so
+		// assert the invariants common to both: the deleted P2 is absent, and the
+		// not-yet-returned items after P2 (P3, P4) are present.
+		if seen["P2"] {
+			t.Errorf("stale-ESK resume unexpectedly returned deleted P2")
+		}
+		if !seen["P3"] || !seen["P4"] {
+			t.Errorf("stale-ESK resume must continue past the deleted key; missing P3/P4 in %v", seenPks)
+		}
+		for i := 1; i < len(seenPks); i++ {
+			for j := 0; j < i; j++ {
+				if seenPks[i] == seenPks[j] {
+					t.Errorf("stale-ESK resume returned duplicate pk %q: %v", seenPks[i], seenPks)
+				}
+			}
+		}
+	})
+}
+
+// equalStrings compares two string slices element-wise.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

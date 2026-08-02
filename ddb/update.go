@@ -156,7 +156,16 @@ func (c *Client) UpdateItem(ctx context.Context, in UpdateItemInput) (UpdateItem
 	if len(wire) > maxItemBytes {
 		return UpdateItemOutput{}, fmt.Errorf("%w: item size %d exceeds %d bytes", ErrValidation, len(wire), maxItemBytes)
 	}
-	if err := c.store.PutItem(tx, in.TableName, hashVal, rangeVal, wire); err != nil {
+	// GSI key validation on the post-write item (atomic rejection).
+	if err := validateGsiKeys(updated, def.GSIs); err != nil {
+		return UpdateItemOutput{}, err
+	}
+
+	dataID, err := c.store.PutItem(tx, in.TableName, hashVal, rangeVal, wire)
+	if err != nil {
+		return UpdateItemOutput{}, err
+	}
+	if err := c.maintainGsiRows(tx, in.TableName, def.GSIs, dataID, updated); err != nil {
 		return UpdateItemOutput{}, err
 	}
 	if err := tx.Commit(); err != nil {

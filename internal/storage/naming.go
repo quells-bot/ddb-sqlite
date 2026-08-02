@@ -16,3 +16,15 @@ func TableName(name string) string {
 	sum := sha256.Sum256([]byte(name))
 	return "ddb_" + hex.EncodeToString(sum[:8]) // 8 bytes = 16 hex chars
 }
+
+// GsiTableName maps a (table, gsi) pair to a safe SQLite identifier:
+// the data table's hashed name + "_" + 16 hex of SHA-256(gsi).
+func GsiTableName(table, gsi string) string {
+	return TableName(table) + "_" + gsiHexFor(gsi)
+}
+
+// gsiHexFor returns the 16-hex-char suffix for a GSI name.
+func gsiHexFor(name string) string {
+	sum := sha256.Sum256([]byte(name))
+	return hex.EncodeToString(sum[:8])
+}

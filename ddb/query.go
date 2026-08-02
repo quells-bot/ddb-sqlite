@@ -14,6 +14,7 @@ import (
 // QueryInput queries one partition by key condition, optionally filtered.
 type QueryInput struct {
 	TableName                 string
+	IndexName                 string
 	KeyConditionExpression    string
 	FilterExpression          string
 	ExpressionAttributeNames  map[string]string
@@ -21,7 +22,7 @@ type QueryInput struct {
 
 	ExclusiveStartKey Item
 	Limit             int32
-	ScanIndexForward  bool   // default true (ASC)
+	ScanIndexForward  bool   // true = forward ASC; false = reverse DESC (zero value false). Adapter defaults nil->true.
 	ConsistentRead    bool   // accepted, ignored (engine is always consistent)
 	Select            string // "" (default ALL_ATTRIBUTES) or "COUNT"
 }
@@ -37,6 +38,7 @@ type QueryOutput struct {
 // ScanInput scans a full table (or one parallel segment).
 type ScanInput struct {
 	TableName                 string
+	IndexName                 string
 	FilterExpression          string
 	ExpressionAttributeNames  map[string]string
 	ExpressionAttributeValues map[string]attrval.Value
@@ -57,17 +59,32 @@ type ScanOutput struct {
 	LastEvaluatedKey Item
 }
 
-// validateSelect normalizes "" to "ALL_ATTRIBUTES". Accepts "ALL_ATTRIBUTES"
-// and "COUNT". Rejects "SPECIFIC_ATTRIBUTES" and "ALL_PROJECTED_ATTRIBUTES"
-// (need ProjectionExpression / GSI — both v1 non-goals). Case-sensitive.
-func validateSelect(s string) (string, error) {
+// validateSelect normalizes "" faithfully to DynamoDB's default: ALL_ATTRIBUTES
+// on a base table, ALL_PROJECTED_ATTRIBUTES on a GSI. On a non-ALL GSI,
+// ALL_ATTRIBUTES is rejected; ALL_PROJECTED_ATTRIBUTES is valid only on a GSI.
+// COUNT is always valid. SPECIFIC_ATTRIBUTES needs ProjectionExpression (v1
+// non-goal). gsiProjection is "" for a base table.
+func validateSelect(s string, gsiProjection string) (string, error) {
 	switch s {
-	case "", "ALL_ATTRIBUTES":
+	case "":
+		if gsiProjection != "" && gsiProjection != "ALL" {
+			return "ALL_PROJECTED_ATTRIBUTES", nil
+		}
 		return "ALL_ATTRIBUTES", nil
+	case "ALL_ATTRIBUTES":
+		if gsiProjection != "" && gsiProjection != "ALL" {
+			return "", fmt.Errorf("%w: Select type ALL_ATTRIBUTES is not supported for global secondary index because its projection type is not ALL", ErrValidation)
+		}
+		return "ALL_ATTRIBUTES", nil
+	case "ALL_PROJECTED_ATTRIBUTES":
+		if gsiProjection == "" {
+			return "", fmt.Errorf("%w: Select type ALL_PROJECTED_ATTRIBUTES is valid only on a global secondary index", ErrValidation)
+		}
+		return "ALL_PROJECTED_ATTRIBUTES", nil
 	case "COUNT":
 		return "COUNT", nil
-	case "SPECIFIC_ATTRIBUTES", "ALL_PROJECTED_ATTRIBUTES":
-		return "", fmt.Errorf("%w: Select %q requires ProjectionExpression or a GSI", ErrValidation, s)
+	case "SPECIFIC_ATTRIBUTES":
+		return "", fmt.Errorf("%w: Select SPECIFIC_ATTRIBUTES requires ProjectionExpression", ErrValidation)
 	default:
 		return "", fmt.Errorf("%w: Select %q is not a valid value", ErrValidation, s)
 	}
@@ -114,14 +131,26 @@ func (c *Client) Query(ctx context.Context, in QueryInput) (QueryOutput, error) 
 		return QueryOutput{}, err
 	}
 
-	selectMode, err := validateSelect(in.Select)
+	// Resolve index: base table or GSI.
+	var gsiDef storage.GsiDef
+	var gsiHash, gsiRange, gsiProjection string
+	if in.IndexName != "" {
+		gsiDef, err = lookupGsi(def, in.IndexName)
+		if err != nil {
+			return QueryOutput{}, err
+		}
+		if in.ConsistentRead {
+			return QueryOutput{}, fmt.Errorf("%w: Consistent reads are not supported on global secondary indexes", ErrValidation)
+		}
+		gsiHash = gsiDef.Hash
+		gsiRange = gsiDef.Range
+		gsiProjection = gsiDef.ProjectionType
+	}
+
+	selectMode, err := validateSelect(in.Select, gsiProjection)
 	if err != nil {
 		return QueryOutput{}, err
 	}
-
-	// IndexName is rejected in M3 (GSI is M4).
-	// (QueryInput has no IndexName field yet — this check is a no-op until M4
-	// adds the field. The adapter checks IndexName before calling the engine.)
 
 	// Parse/bind expressions. An empty KeyConditionExpression fails as a parse
 	// error → ErrValidation, the same exception type DynamoDB raises.
@@ -138,37 +167,52 @@ func (c *Client) Query(ctx context.Context, in QueryInput) (QueryOutput, error) 
 		return QueryOutput{}, fmt.Errorf("%w: KeyConditionExpression is required", ErrValidation)
 	}
 
+	pkName := def.Hash
+	skName := def.Range
+	keyType := def.HashType
+	rangeType := def.RangeType
+	if in.IndexName != "" {
+		pkName = gsiHash
+		skName = gsiRange
+		keyType = gsiDef.HashType
+		rangeType = gsiDef.RangeType
+	}
+
 	// Extract the key condition from the bound AST.
-	kc, err := ex.Cond.ExtractKeyCondition(def.Hash, def.Range)
+	kc, err := ex.Cond.ExtractKeyCondition(pkName, skName)
 	if err != nil {
 		return QueryOutput{}, fmt.Errorf("%w: %v", ErrValidation, err)
 	}
 
 	// Validate partition value type.
-	if kc.Partition.Value.Tag() != tagForKeyType(def.HashType) {
+	if kc.Partition.Value.Tag() != tagForKeyType(keyType) {
 		return QueryOutput{}, fmt.Errorf("%w: partition key type mismatch", ErrValidation)
 	}
 
 	// Validate sort key: begins_with on N is rejected; sort value types match.
 	if kc.Sort != nil {
-		if kc.Sort.Op == "BEGINS_WITH" && def.RangeType == "N" {
+		if kc.Sort.Op == "BEGINS_WITH" && rangeType == "N" {
 			return QueryOutput{}, fmt.Errorf("%w: begins_with is not supported on Number sort keys", ErrValidation)
 		}
 		sortVal := kc.Sort.Lo
 		if kc.Sort.Op == "BEGINS_WITH" {
 			sortVal = kc.Sort.BeginsWith
 		}
-		if sortVal.Tag() != tagForKeyType(def.RangeType) {
+		if sortVal.Tag() != tagForKeyType(rangeType) {
 			return QueryOutput{}, fmt.Errorf("%w: sort key type mismatch", ErrValidation)
 		}
-		if kc.Sort.Op == "BETWEEN" && kc.Sort.Hi.Tag() != tagForKeyType(def.RangeType) {
+		if kc.Sort.Op == "BETWEEN" && kc.Sort.Hi.Tag() != tagForKeyType(rangeType) {
 			return QueryOutput{}, fmt.Errorf("%w: sort key BETWEEN hi type mismatch", ErrValidation)
 		}
 	}
 
-	// ValidateFilterKeys if a filter is present.
+	// Filter keys: exclude table keys AND (for GSI) GSI keys.
+	filterKeyAttrs := keyAttrs(def)
+	if in.IndexName != "" {
+		filterKeyAttrs = gsiKeyAttrsForFilter(def, gsiDef)
+	}
 	if ex.Filter != nil {
-		if err := ex.Filter.ValidateFilterKeys(keyAttrs(def)); err != nil {
+		if err := ex.Filter.ValidateFilterKeys(filterKeyAttrs); err != nil {
 			return QueryOutput{}, fmt.Errorf("%w: %v", ErrValidation, err)
 		}
 	}
@@ -179,47 +223,64 @@ func (c *Client) Query(ctx context.Context, in QueryInput) (QueryOutput, error) 
 		return QueryOutput{}, err
 	}
 
-	var sortCond *storage.SortKeyCond
-	if def.Range != "" {
-		sortCond, err = translateSortCond(kc.Sort, def, in.ScanIndexForward)
-		if err != nil {
-			return QueryOutput{}, err
-		}
-	}
-
-	// Build resume cursor from ExclusiveStartKey.
-	if len(in.ExclusiveStartKey) > 0 {
-		lekHash, lekRange, err := validateKey(def, in.ExclusiveStartKey)
-		if err != nil {
-			return QueryOutput{}, fmt.Errorf("%w: invalid ExclusiveStartKey: %v", ErrValidation, err)
-		}
-		// Partition must match the key condition's partition.
-		if !lekHash.Equal(kc.Partition.Value) {
-			return QueryOutput{}, fmt.Errorf("%w: ExclusiveStartKey partition does not match KeyConditionExpression", ErrValidation)
-		}
-		if def.Range != "" {
-			resumeVal, err := keyValue(lekRange)
-			if err != nil {
-				return QueryOutput{}, err
-			}
-			if sortCond == nil {
-				sortCond = &storage.SortKeyCond{Op: "", ResumeAfter: resumeVal}
-			} else {
-				sortCond.ResumeAfter = resumeVal
-			}
-		}
-	}
-
-	// Limit: 0 = unset (unlimited); negative is rejected.
 	if in.Limit < 0 {
 		return QueryOutput{}, fmt.Errorf("%w: Limit must be non-negative", ErrValidation)
 	}
 	limit := int(in.Limit)
 
-	// Execute.
-	blobs, err := c.store.Query(tx, in.TableName, hashVal, sortCond, in.ScanIndexForward, limit)
-	if err != nil {
-		return QueryOutput{}, err
+	var blobs [][]byte
+	if in.IndexName != "" {
+		// GSI Query path.
+		var sortCond *storage.SortKeyCond
+		if gsiRange != "" {
+			sortCond, err = translateSortCond(kc.Sort, storage.TableDef{RangeType: rangeType}, in.ScanIndexForward)
+			if err != nil {
+				return QueryOutput{}, err
+			}
+		}
+		var resume *storage.GsiResume
+		if len(in.ExclusiveStartKey) > 0 {
+			resume, err = c.validateGsiExclusiveStartKey(tx, def, gsiDef, in.ExclusiveStartKey, kc)
+			if err != nil {
+				return QueryOutput{}, fmt.Errorf("%w: invalid ExclusiveStartKey: %v", ErrValidation, err)
+			}
+		}
+		blobs, err = c.store.QueryGSI(tx, in.TableName, in.IndexName, hashVal, sortCond, resume, in.ScanIndexForward, limit)
+		if err != nil {
+			return QueryOutput{}, err
+		}
+	} else {
+		var sortCond *storage.SortKeyCond
+		if def.Range != "" {
+			sortCond, err = translateSortCond(kc.Sort, def, in.ScanIndexForward)
+			if err != nil {
+				return QueryOutput{}, err
+			}
+		}
+		if len(in.ExclusiveStartKey) > 0 {
+			lekHash, lekRange, eerr := validateKey(def, in.ExclusiveStartKey)
+			if eerr != nil {
+				return QueryOutput{}, fmt.Errorf("%w: invalid ExclusiveStartKey: %v", ErrValidation, eerr)
+			}
+			if !lekHash.Equal(kc.Partition.Value) {
+				return QueryOutput{}, fmt.Errorf("%w: ExclusiveStartKey partition does not match KeyConditionExpression", ErrValidation)
+			}
+			if def.Range != "" {
+				resumeVal, rerr := keyValue(lekRange)
+				if rerr != nil {
+					return QueryOutput{}, rerr
+				}
+				if sortCond == nil {
+					sortCond = &storage.SortKeyCond{Op: "", ResumeAfter: resumeVal}
+				} else {
+					sortCond.ResumeAfter = resumeVal
+				}
+			}
+		}
+		blobs, err = c.store.Query(tx, in.TableName, hashVal, sortCond, in.ScanIndexForward, limit)
+		if err != nil {
+			return QueryOutput{}, err
+		}
 	}
 
 	// Process scanned items.
@@ -233,9 +294,9 @@ func (c *Client) Query(ctx context.Context, in QueryInput) (QueryOutput, error) 
 		scanned++
 		keep := true
 		if ex.Filter != nil {
-			ok, err := ex.Filter.Eval(item)
-			if err != nil {
-				return QueryOutput{}, fmt.Errorf("%w: filter eval: %v", ErrValidation, err)
+			ok, ferr := ex.Filter.Eval(item)
+			if ferr != nil {
+				return QueryOutput{}, fmt.Errorf("%w: filter eval: %v", ErrValidation, ferr)
 			}
 			keep = ok
 		}
@@ -253,14 +314,30 @@ func (c *Client) Query(ctx context.Context, in QueryInput) (QueryOutput, error) 
 		if err := json.Unmarshal(blobs[len(blobs)-1], &lastItem); err != nil {
 			return QueryOutput{}, fmt.Errorf("%w: unmarshal LEK item: %v", ErrValidation, err)
 		}
-		lek = Item{def.Hash: lastItem[def.Hash]}
-		if def.Range != "" {
-			lek[def.Range] = lastItem[def.Range]
+		if in.IndexName != "" {
+			lek = gsiLastEvaluatedKey(def, gsiDef, lastItem)
+		} else {
+			lek = Item{def.Hash: lastItem[def.Hash]}
+			if def.Range != "" {
+				lek[def.Range] = lastItem[def.Range]
+			}
 		}
 	}
 
-	if selectMode == "COUNT" {
-		items = nil
+	// Projection trimming for GSI reads.
+	if in.IndexName != "" {
+		keep := gsiProjectionAttrs(def, gsiDef)
+		for i := range items {
+			items[i] = projectItem(items[i], keep)
+		}
+	}
+
+	if selectMode == "COUNT" || selectMode == "ALL_PROJECTED_ATTRIBUTES" {
+		// ALL_PROJECTED_ATTRIBUTES behaves like the default GSI projection (already trimmed).
+		// COUNT drops items.
+		if selectMode == "COUNT" {
+			items = nil
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -349,7 +426,24 @@ func (c *Client) Scan(ctx context.Context, in ScanInput) (ScanOutput, error) {
 		return ScanOutput{}, err
 	}
 
-	selectMode, err := validateSelect(in.Select)
+	var gsiDef storage.GsiDef
+	var gsiProjection string
+	if in.IndexName != "" {
+		gsiDef, err = lookupGsi(def, in.IndexName)
+		if err != nil {
+			return ScanOutput{}, err
+		}
+		if in.ConsistentRead {
+			return ScanOutput{}, fmt.Errorf("%w: Consistent reads are not supported on global secondary indexes", ErrValidation)
+		}
+		gsiProjection = gsiDef.ProjectionType
+		// GSI parallel scan is a deliberate M4 scope cut.
+		if in.TotalSegments > 1 {
+			return ScanOutput{}, fmt.Errorf("%w: parallel scan on a global secondary index is not supported", ErrValidation)
+		}
+	}
+
+	selectMode, err := validateSelect(in.Select, gsiProjection)
 	if err != nil {
 		return ScanOutput{}, err
 	}
@@ -378,8 +472,12 @@ func (c *Client) Scan(ctx context.Context, in ScanInput) (ScanOutput, error) {
 		if err != nil {
 			return ScanOutput{}, err
 		}
+		filterKeyAttrs := keyAttrs(def)
+		if in.IndexName != "" {
+			filterKeyAttrs = gsiKeyAttrsForFilter(def, gsiDef)
+		}
 		if ex.Filter != nil {
-			if err := ex.Filter.ValidateFilterKeys(keyAttrs(def)); err != nil {
+			if err := ex.Filter.ValidateFilterKeys(filterKeyAttrs); err != nil {
 				return ScanOutput{}, fmt.Errorf("%w: %v", ErrValidation, err)
 			}
 		}
@@ -388,29 +486,38 @@ func (c *Client) Scan(ctx context.Context, in ScanInput) (ScanOutput, error) {
 	// Build resume cursor: resolve ExclusiveStartKey to a rowid.
 	var afterID int64
 	if len(in.ExclusiveStartKey) > 0 {
-		lekHash, lekRange, err := validateKey(def, in.ExclusiveStartKey)
-		if err != nil {
-			return ScanOutput{}, fmt.Errorf("%w: invalid ExclusiveStartKey: %v", ErrValidation, err)
-		}
-		hashVal, err := keyValue(lekHash)
-		if err != nil {
-			return ScanOutput{}, err
-		}
-		var rangeVal any
-		if def.Range != "" && lekRange.Tag() != attrval.TagNull {
-			rangeVal, err = keyValue(lekRange)
+		if in.IndexName != "" {
+			// GSI Scan ESK: validate the union of table+GSI key attrs and resolve
+			// the table key to a data_id (see resolveGsiScanAfterID).
+			afterID, err = c.resolveGsiScanAfterID(tx, def, gsiDef, in.ExclusiveStartKey)
 			if err != nil {
-				return ScanOutput{}, err
+				return ScanOutput{}, fmt.Errorf("%w: invalid ExclusiveStartKey: %v", ErrValidation, err)
 			}
+		} else {
+			lekHash, lekRange, eerr := validateKey(def, in.ExclusiveStartKey)
+			if eerr != nil {
+				return ScanOutput{}, fmt.Errorf("%w: invalid ExclusiveStartKey: %v", ErrValidation, eerr)
+			}
+			hashVal, herr := keyValue(lekHash)
+			if herr != nil {
+				return ScanOutput{}, herr
+			}
+			var rangeVal any
+			if def.Range != "" && lekRange.Tag() != attrval.TagNull {
+				rangeVal, herr = keyValue(lekRange)
+				if herr != nil {
+					return ScanOutput{}, herr
+				}
+			}
+			id, _, found, gerr := c.store.GetItem(tx, in.TableName, hashVal, rangeVal)
+			if gerr != nil {
+				return ScanOutput{}, gerr
+			}
+			if found {
+				afterID = id
+			}
+			// Stale key (not found): scan starts from beginning. Matches DynamoDB.
 		}
-		id, _, found, err := c.store.GetItem(tx, in.TableName, hashVal, rangeVal)
-		if err != nil {
-			return ScanOutput{}, err
-		}
-		if found {
-			afterID = id
-		}
-		// Stale key (not found): scan starts from beginning. Matches DynamoDB.
 	}
 
 	// Limit: 0 = unset (unlimited); negative is rejected.
@@ -419,7 +526,12 @@ func (c *Client) Scan(ctx context.Context, in ScanInput) (ScanOutput, error) {
 	}
 	limit := int(in.Limit)
 
-	blobs, err := c.store.Scan(tx, in.TableName, segment, totalSegments, afterID, limit)
+	var blobs [][]byte
+	if in.IndexName != "" {
+		blobs, err = c.store.ScanGSI(tx, in.TableName, in.IndexName, afterID, limit)
+	} else {
+		blobs, err = c.store.Scan(tx, in.TableName, segment, totalSegments, afterID, limit)
+	}
 	if err != nil {
 		return ScanOutput{}, err
 	}
@@ -434,9 +546,9 @@ func (c *Client) Scan(ctx context.Context, in ScanInput) (ScanOutput, error) {
 		scanned++
 		keep := true
 		if ex.Filter != nil {
-			ok, err := ex.Filter.Eval(item)
-			if err != nil {
-				return ScanOutput{}, fmt.Errorf("%w: filter eval: %v", ErrValidation, err)
+			ok, ferr := ex.Filter.Eval(item)
+			if ferr != nil {
+				return ScanOutput{}, fmt.Errorf("%w: filter eval: %v", ErrValidation, ferr)
 			}
 			keep = ok
 		}
@@ -453,9 +565,21 @@ func (c *Client) Scan(ctx context.Context, in ScanInput) (ScanOutput, error) {
 		if err := json.Unmarshal(blobs[len(blobs)-1], &lastItem); err != nil {
 			return ScanOutput{}, fmt.Errorf("%w: unmarshal LEK item: %v", ErrValidation, err)
 		}
-		lek = Item{def.Hash: lastItem[def.Hash]}
-		if def.Range != "" {
-			lek[def.Range] = lastItem[def.Range]
+		if in.IndexName != "" {
+			lek = gsiLastEvaluatedKey(def, gsiDef, lastItem)
+		} else {
+			lek = Item{def.Hash: lastItem[def.Hash]}
+			if def.Range != "" {
+				lek[def.Range] = lastItem[def.Range]
+			}
+		}
+	}
+
+	// Projection trimming for GSI reads.
+	if in.IndexName != "" {
+		keep := gsiProjectionAttrs(def, gsiDef)
+		for i := range items {
+			items[i] = projectItem(items[i], keep)
 		}
 	}
 

@@ -62,17 +62,90 @@ func (s *Store) DropDataTable(tx *sql.Tx, name string) error {
 }
 
 // PutItem inserts or replaces the item blob for the given key. rangeVal is nil
-// iff the table has no sort key (guaranteed by ddb validation).
-func (s *Store) PutItem(tx *sql.Tx, table string, hashVal, rangeVal any, data []byte) error {
+// iff the table has no sort key (guaranteed by ddb validation). It returns the
+// rowid of the inserted/replaced row (LastInsertId), which callers use as the
+// item's data id when maintaining GSI index rows.
+func (s *Store) PutItem(tx *sql.Tx, table string, hashVal, rangeVal any, data []byte) (int64, error) {
 	tbl := TableName(table)
+	var res sql.Result
 	var err error
 	if rangeVal == nil {
-		_, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (hash, data) VALUES (?, ?)`, hashVal, data)
+		res, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (hash, data) VALUES (?, ?)`, hashVal, data)
 	} else {
-		_, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (hash, range, data) VALUES (?, ?, ?)`, hashVal, rangeVal, data)
+		res, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (hash, range, data) VALUES (?, ?, ?)`, hashVal, rangeVal, data)
 	}
 	if err != nil {
-		return fmt.Errorf("storage: put item %q: %w", table, err)
+		return 0, fmt.Errorf("storage: put item %q: %w", table, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("storage: put item %q id: %w", table, err)
+	}
+	return id, nil
+}
+
+// CreateGsiTable generates and executes the DDL for a GSI index table. It
+// stores one row per base item that participates in the index, keyed by the
+// base data table's id (data_id is the PRIMARY KEY / rowid). data_id references
+// the base table with ON DELETE CASCADE, so deleting a base item removes its
+// index rows. The hash (and optional range) columns hold the projected index
+// key values; a non-unique index over them supports equality/range lookups.
+func (s *Store) CreateGsiTable(tx *sql.Tx, tableDef TableDef, gsi GsiDef) error {
+	gtbl := GsiTableName(tableDef.Name, gsi.Name)
+	ht := sqliteType(gsi.HashType)
+	if ht == "" {
+		return fmt.Errorf("storage: invalid gsi hash key type %q", gsi.HashType)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, `CREATE TABLE %s (data_id INTEGER NOT NULL PRIMARY KEY REFERENCES %s (id) ON DELETE CASCADE, hash %s NOT NULL`, gtbl, TableName(tableDef.Name), ht)
+	if gsi.Range != "" {
+		rt := sqliteType(gsi.RangeType)
+		if rt == "" {
+			return fmt.Errorf("storage: invalid gsi range key type %q", gsi.RangeType)
+		}
+		fmt.Fprintf(&b, `, range %s NOT NULL`, rt)
+	}
+	b.WriteString(`) STRICT`)
+	if _, err := tx.Exec(b.String()); err != nil {
+		return fmt.Errorf("storage: create gsi table %q/%q: %w", tableDef.Name, gsi.Name, err)
+	}
+	// Non-unique index over the index key for lookups.
+	idx := gtbl + `_idx`
+	var isql string
+	if gsi.Range != "" {
+		isql = `CREATE INDEX ` + idx + ` ON ` + gtbl + ` (hash, range)`
+	} else {
+		isql = `CREATE INDEX ` + idx + ` ON ` + gtbl + ` (hash)`
+	}
+	if _, err := tx.Exec(isql); err != nil {
+		return fmt.Errorf("storage: create gsi index %q/%q: %w", tableDef.Name, gsi.Name, err)
+	}
+	return nil
+}
+
+// UpsertGsiRow inserts or replaces the index entry for one base item. dataID is
+// the base data table's rowid; the hash (and optional range) values are the
+// projected index key. Because data_id is the PRIMARY KEY, re-upserting the
+// same item updates its index key values in place (rangeVal is nil for a GSI
+// with no sort key).
+func (s *Store) UpsertGsiRow(tx *sql.Tx, table, gsi string, dataID int64, hashVal, rangeVal any) error {
+	tbl := GsiTableName(table, gsi)
+	var err error
+	if rangeVal == nil {
+		_, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (data_id, hash) VALUES (?, ?)`, dataID, hashVal)
+	} else {
+		_, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (data_id, hash, range) VALUES (?, ?, ?)`, dataID, hashVal, rangeVal)
+	}
+	if err != nil {
+		return fmt.Errorf("storage: upsert gsi row %q/%q: %w", table, gsi, err)
+	}
+	return nil
+}
+
+// DropGsiTable drops the GSI index table for the given table and GSI name.
+func (s *Store) DropGsiTable(tx *sql.Tx, table, gsi string) error {
+	if _, err := tx.Exec(`DROP TABLE IF EXISTS ` + GsiTableName(table, gsi)); err != nil {
+		return fmt.Errorf("storage: drop gsi table %q/%q: %w", table, gsi, err)
 	}
 	return nil
 }

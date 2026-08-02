@@ -32,9 +32,6 @@ func (a *Adapter) Query(ctx context.Context, params *dynamodb.QueryInput, optFns
 	if err := rejectLegacyQuery(params); err != nil {
 		return nil, err
 	}
-	if params.IndexName != nil && *params.IndexName != "" {
-		return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: fmt.Sprintf("awsdynamodb: Query: index %q not found on table %q", aws.ToString(params.IndexName), aws.ToString(params.TableName))}
-	}
 	keyCond, err := exprString(params.KeyConditionExpression, "KeyConditionExpression")
 	if err != nil {
 		return nil, err
@@ -73,6 +70,7 @@ func (a *Adapter) Query(ctx context.Context, params *dynamodb.QueryInput, optFns
 		ScanIndexForward:          params.ScanIndexForward == nil || *params.ScanIndexForward,
 		ConsistentRead:            aws.ToBool(params.ConsistentRead),
 		Select:                    string(params.Select),
+		IndexName:                 aws.ToString(params.IndexName),
 	})
 	if err != nil {
 		return nil, mapError(err)
@@ -108,9 +106,6 @@ func (a *Adapter) Scan(ctx context.Context, params *dynamodb.ScanInput, optFns .
 	if err := rejectLegacyScan(params); err != nil {
 		return nil, err
 	}
-	if params.IndexName != nil && *params.IndexName != "" {
-		return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: fmt.Sprintf("awsdynamodb: Scan: index %q not found on table %q", aws.ToString(params.IndexName), aws.ToString(params.TableName))}
-	}
 	filter, err := exprString(params.FilterExpression, "FilterExpression")
 	if err != nil {
 		return nil, err
@@ -144,6 +139,7 @@ func (a *Adapter) Scan(ctx context.Context, params *dynamodb.ScanInput, optFns .
 		TotalSegments:             aws.ToInt32(params.TotalSegments),
 		ConsistentRead:            aws.ToBool(params.ConsistentRead),
 		Select:                    string(params.Select),
+		IndexName:                 aws.ToString(params.IndexName),
 	})
 	if err != nil {
 		return nil, mapError(err)

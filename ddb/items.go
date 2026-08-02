@@ -164,7 +164,16 @@ func (c *Client) PutItem(ctx context.Context, in PutItemInput) (PutItemOutput, e
 		return PutItemOutput{}, err
 	}
 
-	if err := c.store.PutItem(tx, in.TableName, hashVal, rangeVal, wire); err != nil {
+	// GSI key validation BEFORE the storage write so a rejected write is atomic.
+	if err := validateGsiKeys(in.Item, def.GSIs); err != nil {
+		return PutItemOutput{}, err
+	}
+
+	dataID, err := c.store.PutItem(tx, in.TableName, hashVal, rangeVal, wire)
+	if err != nil {
+		return PutItemOutput{}, err
+	}
+	if err := c.maintainGsiRows(tx, in.TableName, def.GSIs, dataID, in.Item); err != nil {
 		return PutItemOutput{}, err
 	}
 	if err := tx.Commit(); err != nil {

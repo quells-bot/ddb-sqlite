@@ -81,9 +81,6 @@ func mapError(err error) error {
 }
 
 func (a *Adapter) CreateTable(ctx context.Context, params *dynamodb.CreateTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.CreateTableOutput, error) {
-	if len(params.GlobalSecondaryIndexes) > 0 {
-		return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: GlobalSecondaryIndexes not supported in M1"}
-	}
 	ks := make([]ddb.KeySchemaElement, 0, len(params.KeySchema))
 	for _, k := range params.KeySchema {
 		ks = append(ks, ddb.KeySchemaElement{AttributeName: aws.ToString(k.AttributeName), KeyType: string(k.KeyType)})
@@ -92,10 +89,29 @@ func (a *Adapter) CreateTable(ctx context.Context, params *dynamodb.CreateTableI
 	for _, ad := range params.AttributeDefinitions {
 		ads = append(ads, ddb.AttributeDefinition{AttributeName: aws.ToString(ad.AttributeName), AttributeType: string(ad.AttributeType)})
 	}
+	gsis := make([]ddb.GlobalSecondaryIndex, 0, len(params.GlobalSecondaryIndexes))
+	for _, g := range params.GlobalSecondaryIndexes {
+		gsi := ddb.GlobalSecondaryIndex{
+			IndexName: aws.ToString(g.IndexName),
+		}
+		for _, k := range g.KeySchema {
+			gsi.KeySchema = append(gsi.KeySchema, ddb.KeySchemaElement{
+				AttributeName: aws.ToString(k.AttributeName), KeyType: string(k.KeyType),
+			})
+		}
+		if g.Projection != nil {
+			gsi.Projection = ddb.Projection{
+				Type:             string(g.Projection.ProjectionType),
+				NonKeyAttributes: g.Projection.NonKeyAttributes,
+			}
+		}
+		gsis = append(gsis, gsi)
+	}
 	desc, err := a.client.CreateTable(ctx, ddb.CreateTableInput{
-		TableName:            aws.ToString(params.TableName),
-		KeySchema:            ks,
-		AttributeDefinitions: ads,
+		TableName:              aws.ToString(params.TableName),
+		KeySchema:              ks,
+		AttributeDefinitions:   ads,
+		GlobalSecondaryIndexes: gsis,
 	})
 	if err != nil {
 		return nil, mapError(err)
@@ -335,9 +351,9 @@ func (a *Adapter) UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInp
 	return res, nil
 }
 
-// toSDKTableDescription maps the engine TableDescription to the SDK shape. Only
-// M1 fields are populated (KeySchema, AttributeDefinitions, TableName,
-// CreationDateTime); GSIs/billing arrive later.
+// toSDKTableDescription maps the engine TableDescription to the SDK shape.
+// KeySchema, AttributeDefinitions, TableName, CreationDateTime; GSIs/billing
+// arrive later.
 func toSDKTableDescription(d ddb.TableDescription) *types.TableDescription {
 	td := &types.TableDescription{
 		TableName:        aws.String(d.Name),
@@ -349,11 +365,26 @@ func toSDKTableDescription(d ddb.TableDescription) *types.TableDescription {
 	if d.Range != "" {
 		td.KeySchema = append(td.KeySchema, types.KeySchemaElement{AttributeName: aws.String(d.Range), KeyType: types.KeyTypeRange})
 	}
-	if d.Hash != "" {
-		td.AttributeDefinitions = append(td.AttributeDefinitions, types.AttributeDefinition{AttributeName: aws.String(d.Hash), AttributeType: types.ScalarAttributeType(d.HashType)})
+	for _, ad := range d.AttributeDefinitions {
+		td.AttributeDefinitions = append(td.AttributeDefinitions, types.AttributeDefinition{
+			AttributeName: aws.String(ad.AttributeName), AttributeType: types.ScalarAttributeType(ad.AttributeType),
+		})
 	}
-	if d.Range != "" {
-		td.AttributeDefinitions = append(td.AttributeDefinitions, types.AttributeDefinition{AttributeName: aws.String(d.Range), AttributeType: types.ScalarAttributeType(d.RangeType)})
+	for _, g := range d.GlobalSecondaryIndexes {
+		gd := types.GlobalSecondaryIndexDescription{
+			IndexName: aws.String(g.IndexName),
+		}
+		for _, k := range g.KeySchema {
+			kt := types.KeyTypeHash
+			if k.KeyType == "RANGE" {
+				kt = types.KeyTypeRange
+			}
+			gd.KeySchema = append(gd.KeySchema, types.KeySchemaElement{AttributeName: aws.String(k.AttributeName), KeyType: kt})
+		}
+		gd.Projection = &types.Projection{ProjectionType: types.ProjectionType(g.Projection.Type), NonKeyAttributes: g.Projection.NonKeyAttributes}
+		gd.ItemCount = aws.Int64(0)
+		gd.IndexSizeBytes = aws.Int64(0)
+		td.GlobalSecondaryIndexes = append(td.GlobalSecondaryIndexes, gd)
 	}
 	return td
 }
