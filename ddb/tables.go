@@ -85,7 +85,7 @@ func (c *Client) CreateTable(ctx context.Context, in CreateTableInput) (TableDes
 		return TableDescription{}, fmt.Errorf("%w: table %q already exists", ErrTableInUse, in.TableName)
 	}
 
-	now := time.Now().UTC()
+	now := c.now().UTC()
 	meta, err := json.Marshal(map[string]any{"class": "STANDARD", "creationTime": now.Format(time.RFC3339Nano)})
 	if err != nil {
 		return TableDescription{}, fmt.Errorf("%w: marshal table meta: %v", ErrValidation, err)

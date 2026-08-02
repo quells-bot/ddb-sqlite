@@ -113,3 +113,38 @@ func TestDeleteTableDef(t *testing.T) {
 		t.Errorf("after delete, err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestUpdateTableTTL(t *testing.T) {
+	s := newTestStore(t)
+	tx, _ := s.BeginTx(context.Background())
+	defer tx.Rollback()
+
+	id, _ := s.InsertTableDef(tx, sampleDef("T"))
+
+	// Enable sets the catalog attr name.
+	if err := s.UpdateTableTTL(tx, id, "expire"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	def, _ := s.GetTableDef(tx, "T")
+	if def.TTL != "expire" {
+		t.Errorf("after enable: TTL = %q, want %q", def.TTL, "expire")
+	}
+
+	// Re-enable with a different name overwrites.
+	if err := s.UpdateTableTTL(tx, id, "ttl"); err != nil {
+		t.Fatalf("re-specify: %v", err)
+	}
+	def, _ = s.GetTableDef(tx, "T")
+	if def.TTL != "ttl" {
+		t.Errorf("after re-specify: TTL = %q, want %q", def.TTL, "ttl")
+	}
+
+	// Disable sets the catalog column to NULL.
+	if err := s.UpdateTableTTL(tx, id, ""); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	def, _ = s.GetTableDef(tx, "T")
+	if def.TTL != "" {
+		t.Errorf("after disable: TTL = %q, want empty", def.TTL)
+	}
+}

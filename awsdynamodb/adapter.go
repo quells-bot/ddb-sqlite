@@ -388,3 +388,128 @@ func toSDKTableDescription(d ddb.TableDescription) *types.TableDescription {
 	}
 	return td
 }
+
+// UpdateTimeToLive translates the SDK TTL spec to the engine. The adapter
+// validates nothing about content — all attribute-name validation lives in the
+// engine, so its error precedence (table-exists before spec validation) holds
+// and mapError is the single error-mapping point. The only adapter-level checks
+// are the structural nil rejections required to translate at all: a nil
+// TimeToLiveSpecification -> ValidationException (necessarily precedes engine
+// lookup); nil Enabled -> false; nil AttributeName -> "" (the engine then
+// rejects it with ErrValidation).
+func (a *Adapter) UpdateTimeToLive(ctx context.Context, params *dynamodb.UpdateTimeToLiveInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateTimeToLiveOutput, error) {
+	if params.TimeToLiveSpecification == nil {
+		return nil, mapError(fmt.Errorf("%w: TimeToLiveSpecification is required", ddb.ErrValidation))
+	}
+	spec := params.TimeToLiveSpecification
+	out, err := a.client.UpdateTimeToLive(ctx, ddb.UpdateTimeToLiveInput{
+		TableName: aws.ToString(params.TableName),
+		TimeToLiveSpecification: ddb.TimeToLiveSpecification{
+			Enabled:       aws.ToBool(spec.Enabled),
+			AttributeName: aws.ToString(spec.AttributeName),
+		},
+	})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return &dynamodb.UpdateTimeToLiveOutput{
+		TimeToLiveSpecification: &types.TimeToLiveSpecification{
+			Enabled:       aws.Bool(out.TimeToLiveSpecification.Enabled),
+			AttributeName: aws.String(out.TimeToLiveSpecification.AttributeName),
+		},
+	}, nil
+}
+
+// DescribeTimeToLive maps the engine TTL status to the SDK description. When TTL
+// is DISABLED the engine reports an empty AttributeName, which the adapter maps
+// to a nil *string so the SDK description omits the field — DynamoDB omits
+// AttributeName when TTL is disabled, and a pointer-to-empty would diverge in
+// dual-target conformance.
+func (a *Adapter) DescribeTimeToLive(ctx context.Context, params *dynamodb.DescribeTimeToLiveInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DescribeTimeToLiveOutput, error) {
+	out, err := a.client.DescribeTimeToLive(ctx, ddb.DescribeTimeToLiveInput{TableName: aws.ToString(params.TableName)})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	desc := &types.TimeToLiveDescription{TimeToLiveStatus: types.TimeToLiveStatus(out.TimeToLiveStatus)}
+	if out.AttributeName != "" {
+		desc.AttributeName = aws.String(out.AttributeName)
+	}
+	return &dynamodb.DescribeTimeToLiveOutput{TimeToLiveDescription: desc}, nil
+}
+
+// BatchWriteItem translates per-table SDK write requests to the engine. The
+// WriteRequest shape (exactly one of PutRequest/DeleteRequest) is validated
+// by the engine, not here — mapError is the single error-mapping point.
+// ReturnConsumedCapacity/ReturnItemCollectionMetrics are accepted and
+// ignored (out of scope for v1, spec §5.4).
+func (a *Adapter) BatchWriteItem(ctx context.Context, params *dynamodb.BatchWriteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
+	req := make(map[string][]ddb.WriteRequest, len(params.RequestItems))
+	for table, wrs := range params.RequestItems {
+		list := make([]ddb.WriteRequest, 0, len(wrs))
+		for _, wr := range wrs {
+			var out ddb.WriteRequest
+			if wr.PutRequest != nil {
+				item, err := FromSDKMap(wr.PutRequest.Item)
+				if err != nil {
+					return nil, mapError(fmt.Errorf("%w: %v", ddb.ErrValidation, err))
+				}
+				out.Put = &ddb.PutRequest{Item: item}
+			}
+			if wr.DeleteRequest != nil {
+				key, err := FromSDKMap(wr.DeleteRequest.Key)
+				if err != nil {
+					return nil, mapError(fmt.Errorf("%w: %v", ddb.ErrValidation, err))
+				}
+				out.Delete = &ddb.DeleteRequest{Key: key}
+			}
+			list = append(list, out)
+		}
+		req[table] = list
+	}
+	if _, err := a.client.BatchWriteItem(ctx, ddb.BatchWriteItemInput{RequestItems: req}); err != nil {
+		return nil, mapError(err)
+	}
+	// v1: UnprocessedItems is always empty (no throttling).
+	return &dynamodb.BatchWriteItemOutput{}, nil
+}
+
+// BatchGetItem translates per-table SDK key lists to the engine and maps the
+// engine Responses back. Projection fields pass through: the engine rejects
+// them (v1 non-goal, spec §1.1.3) so tests don't believe a projection ran.
+func (a *Adapter) BatchGetItem(ctx context.Context, params *dynamodb.BatchGetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error) {
+	req := make(map[string]ddb.KeysAndAttributes, len(params.RequestItems))
+	for table, ka := range params.RequestItems {
+		keys := make([]ddb.Item, 0, len(ka.Keys))
+		for _, k := range ka.Keys {
+			key, err := FromSDKMap(k)
+			if err != nil {
+				return nil, mapError(fmt.Errorf("%w: %v", ddb.ErrValidation, err))
+			}
+			keys = append(keys, key)
+		}
+		req[table] = ddb.KeysAndAttributes{
+			Keys:                     keys,
+			ConsistentRead:           aws.ToBool(ka.ConsistentRead),
+			ProjectionExpression:     aws.ToString(ka.ProjectionExpression),
+			ExpressionAttributeNames: ka.ExpressionAttributeNames,
+			AttributesToGet:          ka.AttributesToGet,
+		}
+	}
+	out, err := a.client.BatchGetItem(ctx, ddb.BatchGetItemInput{RequestItems: req})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	res := &dynamodb.BatchGetItemOutput{}
+	if len(out.Responses) > 0 {
+		res.Responses = make(map[string][]map[string]types.AttributeValue, len(out.Responses))
+		for table, items := range out.Responses {
+			list := make([]map[string]types.AttributeValue, 0, len(items))
+			for _, it := range items {
+				list = append(list, ToSDKMap(it))
+			}
+			res.Responses[table] = list
+		}
+	}
+	// v1: UnprocessedKeys is always empty (no throttling).
+	return res, nil
+}

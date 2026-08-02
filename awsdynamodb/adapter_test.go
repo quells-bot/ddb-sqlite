@@ -310,3 +310,227 @@ func TestAdapterUpdateItemRejections(t *testing.T) {
 		})
 	}
 }
+
+func TestAdapterUpdateTimeToLive(t *testing.T) {
+	ctx := context.Background()
+	a := adapterClient(t)
+	a.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName:            aws.String("T"),
+		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
+	})
+
+	// Enable -> echoed spec.
+	out, err := a.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+		TableName:               aws.String("T"),
+		TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(true), AttributeName: aws.String("expire")},
+	})
+	if err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	if !aws.ToBool(out.TimeToLiveSpecification.Enabled) || aws.ToString(out.TimeToLiveSpecification.AttributeName) != "expire" {
+		t.Errorf("echoed spec = %+v", out.TimeToLiveSpecification)
+	}
+
+	// Describe reflects ENABLED.
+	desc, err := a.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("T")})
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	if desc.TimeToLiveDescription.TimeToLiveStatus != types.TimeToLiveStatusEnabled {
+		t.Errorf("status = %v, want ENABLED", desc.TimeToLiveDescription.TimeToLiveStatus)
+	}
+	if aws.ToString(desc.TimeToLiveDescription.AttributeName) != "expire" {
+		t.Errorf("attr = %q, want expire", aws.ToString(desc.TimeToLiveDescription.AttributeName))
+	}
+
+	// Disable -> DISABLED, nil AttributeName.
+	a.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+		TableName:               aws.String("T"),
+		TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(false), AttributeName: aws.String("expire")},
+	})
+	desc, _ = a.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("T")})
+	if desc.TimeToLiveDescription.TimeToLiveStatus != types.TimeToLiveStatusDisabled {
+		t.Errorf("after disable: status = %v, want DISABLED", desc.TimeToLiveDescription.TimeToLiveStatus)
+	}
+	if desc.TimeToLiveDescription.AttributeName != nil {
+		t.Errorf("after disable: AttributeName = %v, want nil", desc.TimeToLiveDescription.AttributeName)
+	}
+
+	// Missing table -> ResourceNotFoundException.
+	_, err = a.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+		TableName:               aws.String("nope"),
+		TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(true), AttributeName: aws.String("expire")},
+	})
+	var rnfe *types.ResourceNotFoundException
+	if !errors.As(err, &rnfe) {
+		t.Errorf("missing table: err = %v, want ResourceNotFoundException", err)
+	}
+
+	// nil spec -> ValidationException.
+	_, err = a.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{TableName: aws.String("T")})
+	var ae smithy.APIError
+	if !errors.As(err, &ae) || ae.ErrorCode() != "ValidationException" {
+		t.Errorf("nil spec: err = %v, want ValidationException", err)
+	}
+
+	// nil Enabled treated as false (disable path); nil AttributeName -> engine ValidationException.
+	_, err = a.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+		TableName:               aws.String("T"),
+		TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: nil, AttributeName: nil},
+	})
+	if !errors.As(err, &ae) || ae.ErrorCode() != "ValidationException" {
+		t.Errorf("nil Enabled/AttributeName: err = %v, want ValidationException", err)
+	}
+}
+
+func TestAdapterDescribeTimeToLive(t *testing.T) {
+	ctx := context.Background()
+	a := adapterClient(t)
+	a.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName:            aws.String("T"),
+		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
+	})
+
+	// Never configured -> DISABLED, nil AttributeName.
+	desc, err := a.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("T")})
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	if desc.TimeToLiveDescription.TimeToLiveStatus != types.TimeToLiveStatusDisabled {
+		t.Errorf("status = %v, want DISABLED", desc.TimeToLiveDescription.TimeToLiveStatus)
+	}
+	if desc.TimeToLiveDescription.AttributeName != nil {
+		t.Errorf("AttributeName = %v, want nil", desc.TimeToLiveDescription.AttributeName)
+	}
+
+	// Missing table -> ResourceNotFoundException.
+	var rnfe *types.ResourceNotFoundException
+	_, err = a.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("nope")})
+	if !errors.As(err, &rnfe) {
+		t.Errorf("missing table: err = %v, want ResourceNotFoundException", err)
+	}
+}
+
+func TestAdapterBatchWriteGetRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	a := adapterClient(t)
+
+	_, err := a.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName:            aws.String("T"),
+		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
+	})
+	if err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+
+	bw, err := a.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+		"T": {
+			{PutRequest: &types.PutRequest{Item: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k1"}, "v": &types.AttributeValueMemberS{Value: "one"}}}},
+			{PutRequest: &types.PutRequest{Item: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k2"}}}},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("BatchWriteItem: %v", err)
+	}
+	if len(bw.UnprocessedItems) != 0 {
+		t.Errorf("UnprocessedItems = %v, want empty", bw.UnprocessedItems)
+	}
+
+	bg, err := a.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+		"T": {Keys: []map[string]types.AttributeValue{
+			{"pk": &types.AttributeValueMemberS{Value: "k1"}},
+			{"pk": &types.AttributeValueMemberS{Value: "ghost"}},
+			{"pk": &types.AttributeValueMemberS{Value: "k2"}},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("BatchGetItem: %v", err)
+	}
+	if len(bg.UnprocessedKeys) != 0 {
+		t.Errorf("UnprocessedKeys = %v, want empty", bg.UnprocessedKeys)
+	}
+	if len(bg.Responses["T"]) != 2 {
+		t.Fatalf("len(Responses[T]) = %d, want 2", len(bg.Responses["T"]))
+	}
+	if got := bg.Responses["T"][0]["v"].(*types.AttributeValueMemberS).Value; got != "one" {
+		t.Errorf("Responses[T][0] v = %q, want one", got)
+	}
+
+	// Delete via batch, confirm gone.
+	if _, err := a.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+		"T": {{DeleteRequest: &types.DeleteRequest{Key: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k1"}}}}},
+	}}); err != nil {
+		t.Fatalf("BatchWriteItem delete: %v", err)
+	}
+	got, err := a.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("T"), Key: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k1"}}})
+	if err != nil {
+		t.Fatalf("GetItem: %v", err)
+	}
+	if got.Item != nil {
+		t.Errorf("after batch delete, Item = %v, want nil", got.Item)
+	}
+
+	// Engine validation flows through mapError: empty WriteRequest →
+	// ValidationException.
+	_, err = a.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{"T": {{}}}})
+	var ae smithy.APIError
+	if !errors.As(err, &ae) || ae.ErrorCode() != "ValidationException" {
+		t.Errorf("empty WriteRequest: err = %v, want ValidationException", err)
+	}
+}
+
+// §6.3 divergent rejections (adapter-only — dynamodb-local supports these).
+
+func TestAdapterBatchGetProjectionRejected(t *testing.T) {
+	ctx := context.Background()
+	a := adapterClient(t)
+	mustAdapterTable(t, a, ctx, "T")
+
+	_, err := a.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+		"T": {
+			Keys:                 []map[string]types.AttributeValue{{"pk": &types.AttributeValueMemberS{Value: "k"}}},
+			ProjectionExpression: aws.String("pk"),
+		},
+	}})
+	var ae smithy.APIError
+	if !errors.As(err, &ae) || ae.ErrorCode() != "ValidationException" {
+		t.Errorf("err = %v, want ValidationException", err)
+	}
+}
+
+func TestAdapterBatchGetExpressionNamesRejected(t *testing.T) {
+	ctx := context.Background()
+	a := adapterClient(t)
+	mustAdapterTable(t, a, ctx, "T")
+
+	_, err := a.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+		"T": {
+			Keys:                     []map[string]types.AttributeValue{{"pk": &types.AttributeValueMemberS{Value: "k"}}},
+			ExpressionAttributeNames: map[string]string{"#p": "pk"},
+		},
+	}})
+	var ae smithy.APIError
+	if !errors.As(err, &ae) || ae.ErrorCode() != "ValidationException" {
+		t.Errorf("err = %v, want ValidationException", err)
+	}
+}
+
+func TestAdapterBatchGetAttributesToGetRejected(t *testing.T) {
+	ctx := context.Background()
+	a := adapterClient(t)
+	mustAdapterTable(t, a, ctx, "T")
+
+	_, err := a.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+		"T": {
+			Keys:            []map[string]types.AttributeValue{{"pk": &types.AttributeValueMemberS{Value: "k"}}},
+			AttributesToGet: []string{"pk"},
+		},
+	}})
+	var ae smithy.APIError
+	if !errors.As(err, &ae) || ae.ErrorCode() != "ValidationException" {
+		t.Errorf("err = %v, want ValidationException", err)
+	}
+}

@@ -25,7 +25,9 @@ func sqliteType(t string) string {
 }
 
 // CreateDataTable generates and executes the per-table DDL. The data column is
-// always BLOB (opaque wire-JSON bytes); ttl is NULL for now (populated M5).
+// always BLOB (opaque wire-JSON bytes). TTL is configured at the catalog level
+// (ddb_table_defs.ttl stores the attribute name) and reaped by ExpireExpired,
+// which parses the attribute out of the blob — no per-item ttl column is needed.
 func (s *Store) CreateDataTable(tx *sql.Tx, def TableDef) error {
 	ht := sqliteType(def.HashType)
 	if ht == "" {
@@ -40,7 +42,7 @@ func (s *Store) CreateDataTable(tx *sql.Tx, def TableDef) error {
 		}
 		fmt.Fprintf(&b, `, range %s NOT NULL`, rt)
 	}
-	b.WriteString(`, data BLOB NOT NULL, ttl INTEGER`)
+	b.WriteString(`, data BLOB NOT NULL`)
 	if def.Range != "" {
 		b.WriteString(`, UNIQUE (hash, range)`)
 	} else {
@@ -183,4 +185,49 @@ func (s *Store) DeleteItem(tx *sql.Tx, table string, hashVal, rangeVal any) (fou
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
+}
+
+// ExpireExpired scans all rows in the table's data table, calls expired(data)
+// for each blob, and deletes the rows for which expired returns true. Returns
+// the count of deleted rows. GSI index rows are cleaned by the ON DELETE
+// CASCADE foreign key on GSI tables. The expired callback is provided by ddb
+// and handles blob unmarshalling + TTL attribute extraction; storage stays
+// blob-agnostic.
+func (s *Store) ExpireExpired(tx *sql.Tx, table string, expired func([]byte) (bool, error)) (int64, error) {
+	tbl := TableName(table)
+	rows, err := tx.Query(`SELECT id, data FROM ` + tbl)
+	if err != nil {
+		return 0, fmt.Errorf("storage: expire scan %q: %w", table, err)
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		var data []byte
+		if err := rows.Scan(&id, &data); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("storage: expire scan %q: %w", table, err)
+		}
+		ok, err := expired(data)
+		if err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("storage: expire %q: %w", table, err)
+		}
+		if ok {
+			ids = append(ids, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("storage: expire scan %q: %w", table, err)
+	}
+	rows.Close() // cannot issue DELETE while iterating on the same tx
+
+	var n int64
+	for _, id := range ids {
+		if _, err := tx.Exec(`DELETE FROM `+tbl+` WHERE id = ?`, id); err != nil {
+			return n, fmt.Errorf("storage: expire delete %q: %w", table, err)
+		}
+		n++
+	}
+	return n, nil
 }

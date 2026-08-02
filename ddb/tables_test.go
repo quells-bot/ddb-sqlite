@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 func newClient(t *testing.T) *Client {
@@ -295,5 +296,47 @@ func TestCreateTableGSIOverlappingKey(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("overlapping key: %v", err)
+	}
+}
+
+func TestInjectableClock(t *testing.T) {
+	ctx := context.Background()
+
+	// A fixed clock drives CreationTime.
+	fixed := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	c, err := Open(ctx, Options{DSN: ":memory:", Now: func() time.Time { return fixed }})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	desc, err := c.CreateTable(ctx, CreateTableInput{
+		TableName:            "T",
+		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
+		AttributeDefinitions: []AttributeDefinition{{AttributeName: "pk", AttributeType: "S"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+	if !desc.CreationTime.Equal(fixed) {
+		t.Errorf("CreationTime = %v, want %v", desc.CreationTime, fixed)
+	}
+
+	// Default (nil Now) uses time.Now.
+	c2, err := Open(ctx, Options{DSN: ":memory:"})
+	if err != nil {
+		t.Fatalf("Open default: %v", err)
+	}
+	t.Cleanup(func() { _ = c2.Close() })
+	desc2, err := c2.CreateTable(ctx, CreateTableInput{
+		TableName:            "T",
+		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
+		AttributeDefinitions: []AttributeDefinition{{AttributeName: "pk", AttributeType: "S"}},
+	})
+	if err != nil {
+		t.Fatalf("CreateTable default: %v", err)
+	}
+	if desc2.CreationTime.IsZero() {
+		t.Error("default clock: CreationTime not set")
 	}
 }

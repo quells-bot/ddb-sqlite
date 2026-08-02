@@ -88,23 +88,8 @@ func (c *Client) PutItem(ctx context.Context, in PutItemInput) (PutItemOutput, e
 		return PutItemOutput{}, err
 	}
 
-	// Validate the partition key attribute is present with the right type.
-	hv, ok := in.Item[def.Hash]
-	if !ok {
-		return PutItemOutput{}, fmt.Errorf("%w: item missing partition key %q", ErrValidation, def.Hash)
-	}
-	if hv.Tag() != tagForKeyType(def.HashType) {
-		return PutItemOutput{}, fmt.Errorf("%w: partition key %q type %s != declared %s", ErrValidation, def.Hash, hv.Type(), def.HashType)
-	}
-	var rvKey attrval.Value
-	if def.Range != "" {
-		rvKey, ok = in.Item[def.Range]
-		if !ok {
-			return PutItemOutput{}, fmt.Errorf("%w: item missing sort key %q", ErrValidation, def.Range)
-		}
-		if rvKey.Tag() != tagForKeyType(def.RangeType) {
-			return PutItemOutput{}, fmt.Errorf("%w: sort key %q type %s != declared %s", ErrValidation, def.Range, rvKey.Type(), def.RangeType)
-		}
+	if err := validatePutKey(def, in.Item); err != nil {
+		return PutItemOutput{}, err
 	}
 
 	// Expressions are validated only after the table and key, because that is
@@ -140,13 +125,13 @@ func (c *Client) PutItem(ctx context.Context, in PutItemInput) (PutItemOutput, e
 	}
 
 	// Extract key column values.
-	hashVal, err := keyValue(hv)
+	hashVal, err := keyValue(in.Item[def.Hash])
 	if err != nil {
 		return PutItemOutput{}, err
 	}
 	var rangeVal any
 	if def.Range != "" {
-		rangeVal, err = keyValue(rvKey)
+		rangeVal, err = keyValue(in.Item[def.Range])
 		if err != nil {
 			return PutItemOutput{}, err
 		}
@@ -236,6 +221,28 @@ type DeleteItemInput struct {
 // DeleteItemOutput carries the deleted item when ReturnValues=ALL_OLD.
 type DeleteItemOutput struct {
 	Attributes Item
+}
+
+// validatePutKey checks the item carries the table's key attributes with
+// matching types. Shared by PutItem and BatchWriteItem.
+func validatePutKey(def storage.TableDef, item Item) error {
+	hv, ok := item[def.Hash]
+	if !ok {
+		return fmt.Errorf("%w: item missing partition key %q", ErrValidation, def.Hash)
+	}
+	if hv.Tag() != tagForKeyType(def.HashType) {
+		return fmt.Errorf("%w: partition key %q type %s != declared %s", ErrValidation, def.Hash, hv.Type(), def.HashType)
+	}
+	if def.Range != "" {
+		rv, ok := item[def.Range]
+		if !ok {
+			return fmt.Errorf("%w: item missing sort key %q", ErrValidation, def.Range)
+		}
+		if rv.Tag() != tagForKeyType(def.RangeType) {
+			return fmt.Errorf("%w: sort key %q type %s != declared %s", ErrValidation, def.Range, rv.Type(), def.RangeType)
+		}
+	}
+	return nil
 }
 
 // validateKey checks the Key carries exactly the table's key attributes with

@@ -37,6 +37,10 @@ type api interface {
 	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
 	Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
 	Scan(ctx context.Context, params *dynamodb.ScanInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error)
+	BatchWriteItem(ctx context.Context, params *dynamodb.BatchWriteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
+	BatchGetItem(ctx context.Context, params *dynamodb.BatchGetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error)
+	UpdateTimeToLive(ctx context.Context, params *dynamodb.UpdateTimeToLiveInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateTimeToLiveOutput, error)
+	DescribeTimeToLive(ctx context.Context, params *dynamodb.DescribeTimeToLiveInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DescribeTimeToLiveOutput, error)
 }
 
 type confTarget struct {
@@ -263,6 +267,15 @@ func mustCreate(t *testing.T, c api, ctx context.Context, name string) {
 }
 
 func strVal(s string) types.AttributeValue { return &types.AttributeValueMemberS{Value: s} }
+
+// batchPut/batchDel build BatchWriteItem request entries for conformance cases.
+func batchPut(item map[string]types.AttributeValue) types.WriteRequest {
+	return types.WriteRequest{PutRequest: &types.PutRequest{Item: item}}
+}
+
+func batchDel(key map[string]types.AttributeValue) types.WriteRequest {
+	return types.WriteRequest{DeleteRequest: &types.DeleteRequest{Key: key}}
+}
 
 // mustCreateComposite creates a table with a composite primary key (pk HASH S,
 // sk RANGE N) for Query/Scan conformance cases.
@@ -4369,4 +4382,841 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// --- M5a TTL conformance cases ---
+
+func TestConfUpdateTimeToLive(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TTLTbl")
+
+		// Enable.
+		_, err := c.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+			TableName:               aws.String("TTLTbl"),
+			TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(true), AttributeName: aws.String("expire")},
+		})
+		if err != nil {
+			t.Fatalf("enable: %v", err)
+		}
+		out, err := c.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("TTLTbl")})
+		if err != nil {
+			t.Fatalf("describe: %v", err)
+		}
+		if out.TimeToLiveDescription.TimeToLiveStatus != types.TimeToLiveStatusEnabled {
+			t.Errorf("status = %v, want ENABLED", out.TimeToLiveDescription.TimeToLiveStatus)
+		}
+		if aws.ToString(out.TimeToLiveDescription.AttributeName) != "expire" {
+			t.Errorf("attr = %q, want expire", aws.ToString(out.TimeToLiveDescription.AttributeName))
+		}
+
+		// Disable.
+		_, err = c.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+			TableName:               aws.String("TTLTbl"),
+			TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(false), AttributeName: aws.String("expire")},
+		})
+		if err != nil {
+			t.Fatalf("disable: %v", err)
+		}
+		out, _ = c.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("TTLTbl")})
+		if out.TimeToLiveDescription.TimeToLiveStatus != types.TimeToLiveStatusDisabled {
+			t.Errorf("after disable: status = %v, want DISABLED", out.TimeToLiveDescription.TimeToLiveStatus)
+		}
+
+		// Re-enable with a different attribute.
+		_, err = c.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+			TableName:               aws.String("TTLTbl"),
+			TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(true), AttributeName: aws.String("ttl")},
+		})
+		if err != nil {
+			t.Fatalf("re-enable: %v", err)
+		}
+		out, _ = c.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("TTLTbl")})
+		if out.TimeToLiveDescription.TimeToLiveStatus != types.TimeToLiveStatusEnabled || aws.ToString(out.TimeToLiveDescription.AttributeName) != "ttl" {
+			t.Errorf("after re-enable: status=%v attr=%q, want ENABLED/ttl", out.TimeToLiveDescription.TimeToLiveStatus, aws.ToString(out.TimeToLiveDescription.AttributeName))
+		}
+	})
+}
+
+func TestConfUpdateTimeToLiveErrors(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+
+		// Nonexistent table -> ResourceNotFoundException (precedence over spec validation).
+		_, err := c.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+			TableName:               aws.String("nope"),
+			TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(true), AttributeName: aws.String("")},
+		})
+		asResourceNotFound(t, err, "missing table precedence")
+
+		mustCreate(t, c, ctx, "TTLTbl")
+
+		// Empty AttributeName when enabling -> ValidationException.
+		_, err = c.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+			TableName:               aws.String("TTLTbl"),
+			TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(true), AttributeName: aws.String("")},
+		})
+		asValidation(t, err, "empty attr enabling")
+
+		// Empty AttributeName when disabling -> ValidationException (required unconditionally).
+		_, err = c.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+			TableName:               aws.String("TTLTbl"),
+			TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(false), AttributeName: aws.String("")},
+		})
+		asValidation(t, err, "empty attr disabling")
+	})
+}
+
+func TestConfDescribeTimeToLive(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TTLTbl")
+
+		// Never configured -> DISABLED, nil AttributeName.
+		out, err := c.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("TTLTbl")})
+		if err != nil {
+			t.Fatalf("describe never-set: %v", err)
+		}
+		if out.TimeToLiveDescription.TimeToLiveStatus != types.TimeToLiveStatusDisabled {
+			t.Errorf("never-set: status = %v, want DISABLED", out.TimeToLiveDescription.TimeToLiveStatus)
+		}
+		if out.TimeToLiveDescription.AttributeName != nil {
+			t.Errorf("never-set: AttributeName = %v, want nil", out.TimeToLiveDescription.AttributeName)
+		}
+
+		// Enable -> ENABLED + attr.
+		c.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+			TableName:               aws.String("TTLTbl"),
+			TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(true), AttributeName: aws.String("expire")},
+		})
+		out, _ = c.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("TTLTbl")})
+		if out.TimeToLiveDescription.TimeToLiveStatus != types.TimeToLiveStatusEnabled || aws.ToString(out.TimeToLiveDescription.AttributeName) != "expire" {
+			t.Errorf("enabled: status=%v attr=%q, want ENABLED/expire", out.TimeToLiveDescription.TimeToLiveStatus, aws.ToString(out.TimeToLiveDescription.AttributeName))
+		}
+
+		// Disable -> DISABLED, nil AttributeName.
+		c.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+			TableName:               aws.String("TTLTbl"),
+			TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(false), AttributeName: aws.String("expire")},
+		})
+		out, _ = c.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("TTLTbl")})
+		if out.TimeToLiveDescription.TimeToLiveStatus != types.TimeToLiveStatusDisabled {
+			t.Errorf("after disable: status = %v, want DISABLED", out.TimeToLiveDescription.TimeToLiveStatus)
+		}
+		if out.TimeToLiveDescription.AttributeName != nil {
+			t.Errorf("after disable: AttributeName = %v, want nil", out.TimeToLiveDescription.AttributeName)
+		}
+	})
+}
+
+func TestConfTTLExpiredItemVisible(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "TTLTbl") // pk HASH S, sk RANGE N
+
+		// Enable TTL with attr "expire".
+		_, err := c.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+			TableName:               aws.String("TTLTbl"),
+			TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(true), AttributeName: aws.String("expire")},
+		})
+		if err != nil {
+			t.Fatalf("UpdateTimeToLive: %v", err)
+		}
+
+		// Put an item whose TTL attr is a past epoch.
+		past := strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10)
+		putConf(t, c, ctx, "TTLTbl", map[string]types.AttributeValue{
+			"pk":     strVal("k1"),
+			"sk":     numVal("1"),
+			"expire": numVal(past),
+		})
+
+		// GetItem returns the (expired) item — no read filtering.
+		got, err := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("TTLTbl"), Key: map[string]types.AttributeValue{"pk": strVal("k1"), "sk": numVal("1")}})
+		if err != nil {
+			t.Fatalf("GetItem: %v", err)
+		}
+		if len(got.Item) == 0 {
+			t.Fatal("expired item not visible on GetItem; Faithful read filtering is on")
+		}
+
+		// Query includes the expired item.
+		q, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("TTLTbl"),
+			KeyConditionExpression:    aws.String("pk = :pk"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{":pk": strVal("k1")},
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(q.Items) != 1 {
+			t.Errorf("Query items = %d, want 1 (expired item must be visible)", len(q.Items))
+		}
+
+		// Scan includes the expired item.
+		sc, err := c.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String("TTLTbl")})
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if len(sc.Items) != 1 {
+			t.Errorf("Scan items = %d, want 1 (expired item must be visible)", len(sc.Items))
+		}
+	})
+}
+
+// =====================================================================
+// M5b — BatchWriteItem conformance (dual-target)
+// =====================================================================
+
+func TestConfBatchWriteMultiTable(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchA")
+		mustCreate(t, c, ctx, "BatchB")
+
+		out, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchA": {batchPut(map[string]types.AttributeValue{"pk": strVal("a1"), "v": strVal("one")})},
+			"BatchB": {batchPut(map[string]types.AttributeValue{"pk": strVal("b1"), "v": strVal("two")})},
+		}})
+		if err != nil {
+			t.Fatalf("BatchWriteItem: %v", err)
+		}
+		if len(out.UnprocessedItems) != 0 {
+			t.Errorf("UnprocessedItems = %v, want empty", out.UnprocessedItems)
+		}
+		for table, want := range map[string][2]string{"BatchA": {"a1", "one"}, "BatchB": {"b1", "two"}} {
+			got, err := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(table), Key: map[string]types.AttributeValue{"pk": strVal(want[0])}})
+			if err != nil {
+				t.Fatalf("GetItem %s: %v", table, err)
+			}
+			if v := got.Item["v"].(*types.AttributeValueMemberS).Value; v != want[1] {
+				t.Errorf("%s/%s v = %q, want %q", table, want[0], v, want[1])
+			}
+		}
+	})
+}
+
+func TestConfBatchWriteCountLimit(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+
+		mk := func(n int) []types.WriteRequest {
+			reqs := make([]types.WriteRequest, 0, n)
+			for i := 0; i < n; i++ {
+				reqs = append(reqs, batchPut(map[string]types.AttributeValue{"pk": strVal(fmt.Sprintf("k%02d", i))}))
+			}
+			return reqs
+		}
+		if _, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{"BatchT": mk(25)}}); err != nil {
+			t.Errorf("25 requests: %v", err)
+		}
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{"BatchT": mk(26)}})
+		asValidation(t, err, "26 requests")
+	})
+}
+
+func TestConfBatchWriteDuplicateKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchT": {
+				batchPut(map[string]types.AttributeValue{"pk": strVal("k"), "v": strVal("one")}),
+				batchPut(map[string]types.AttributeValue{"pk": strVal("k"), "v": strVal("two")}),
+			},
+		}})
+		asValidation(t, err, "duplicate put keys")
+	})
+}
+
+func TestConfBatchWritePutDeleteSameKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchT": {
+				batchPut(map[string]types.AttributeValue{"pk": strVal("k")}),
+				batchDel(map[string]types.AttributeValue{"pk": strVal("k")}),
+			},
+		}})
+		asValidation(t, err, "put+delete same key")
+	})
+}
+
+func TestConfBatchWriteCrossTableSameKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchA")
+		mustCreate(t, c, ctx, "BatchB")
+		// Same key value in different tables is NOT a duplicate.
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchA": {batchPut(map[string]types.AttributeValue{"pk": strVal("k")})},
+			"BatchB": {batchPut(map[string]types.AttributeValue{"pk": strVal("k")})},
+		}})
+		if err != nil {
+			t.Fatalf("BatchWriteItem: %v", err)
+		}
+		for _, table := range []string{"BatchA", "BatchB"} {
+			got, err := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String(table), Key: map[string]types.AttributeValue{"pk": strVal("k")}})
+			if err != nil || len(got.Item) == 0 {
+				t.Errorf("%s/k: item=%v err=%v", table, got.Item, err)
+			}
+		}
+	})
+}
+
+func TestConfBatchWriteUnknownTable(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "Good")
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"Good": {batchPut(map[string]types.AttributeValue{"pk": strVal("k")})},
+			"Nope": {batchPut(map[string]types.AttributeValue{"pk": strVal("k")})},
+		}})
+		asResourceNotFound(t, err, "unknown table in batch")
+		// No partial processing: the valid table's item was NOT written.
+		got, err := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("Good"), Key: map[string]types.AttributeValue{"pk": strVal("k")}})
+		if err != nil {
+			t.Fatalf("GetItem: %v", err)
+		}
+		if len(got.Item) != 0 {
+			t.Errorf("valid table written despite rejected batch: %v", got.Item)
+		}
+	})
+}
+
+func TestConfBatchWriteBadKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchT": {
+				batchPut(map[string]types.AttributeValue{"pk": strVal("good")}),
+				batchPut(map[string]types.AttributeValue{"v": strVal("no partition key")}),
+			},
+		}})
+		asValidation(t, err, "item missing partition key")
+		got, err := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("BatchT"), Key: map[string]types.AttributeValue{"pk": strVal("good")}})
+		if err != nil {
+			t.Fatalf("GetItem: %v", err)
+		}
+		if len(got.Item) != 0 {
+			t.Errorf("valid request written despite rejected batch: %v", got.Item)
+		}
+	})
+}
+
+func TestConfBatchWriteEmptyRequestItems(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{}})
+		asValidation(t, err, "empty RequestItems")
+	})
+}
+
+func TestConfBatchWriteMixed(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchA")
+		mustCreate(t, c, ctx, "BatchB")
+		putConf(t, c, ctx, "BatchA", map[string]types.AttributeValue{"pk": strVal("del")})
+
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchA": {
+				batchPut(map[string]types.AttributeValue{"pk": strVal("put1")}),
+				batchDel(map[string]types.AttributeValue{"pk": strVal("del")}),
+			},
+			"BatchB": {batchPut(map[string]types.AttributeValue{"pk": strVal("keep")})},
+		}})
+		if err != nil {
+			t.Fatalf("BatchWriteItem: %v", err)
+		}
+		got, _ := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("BatchA"), Key: map[string]types.AttributeValue{"pk": strVal("put1")}})
+		if len(got.Item) == 0 {
+			t.Error("BatchA/put1 missing")
+		}
+		got, _ = c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("BatchA"), Key: map[string]types.AttributeValue{"pk": strVal("del")}})
+		if len(got.Item) != 0 {
+			t.Errorf("BatchA/del should be deleted: %v", got.Item)
+		}
+		got, _ = c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("BatchB"), Key: map[string]types.AttributeValue{"pk": strVal("keep")}})
+		if len(got.Item) == 0 {
+			t.Error("BatchB/keep missing")
+		}
+	})
+}
+
+func TestConfBatchWriteDelete(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		for _, k := range []string{"k1", "k2", "k3"} {
+			putConf(t, c, ctx, "BatchT", map[string]types.AttributeValue{"pk": strVal(k)})
+		}
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchT": {
+				batchDel(map[string]types.AttributeValue{"pk": strVal("k1")}),
+				batchDel(map[string]types.AttributeValue{"pk": strVal("k2")}),
+			},
+		}})
+		if err != nil {
+			t.Fatalf("BatchWriteItem: %v", err)
+		}
+		for _, k := range []string{"k1", "k2"} {
+			got, _ := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("BatchT"), Key: map[string]types.AttributeValue{"pk": strVal(k)}})
+			if len(got.Item) != 0 {
+				t.Errorf("%s should be deleted: %v", k, got.Item)
+			}
+		}
+		got, _ := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("BatchT"), Key: map[string]types.AttributeValue{"pk": strVal("k3")}})
+		if len(got.Item) == 0 {
+			t.Error("k3 should remain")
+		}
+	})
+}
+
+func TestConfBatchWriteOverwrite(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		putConf(t, c, ctx, "BatchT", map[string]types.AttributeValue{"pk": strVal("k"), "v": strVal("first")})
+		if _, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchT": {batchPut(map[string]types.AttributeValue{"pk": strVal("k"), "v": strVal("second")})},
+		}}); err != nil {
+			t.Fatalf("BatchWriteItem: %v", err)
+		}
+		got, _ := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("BatchT"), Key: map[string]types.AttributeValue{"pk": strVal("k")}})
+		if v := got.Item["v"].(*types.AttributeValueMemberS).Value; v != "second" {
+			t.Errorf("v = %q, want second", v)
+		}
+	})
+}
+
+func TestConfBatchWriteGsiPut(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "BatchG")
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchG": {
+				batchPut(map[string]types.AttributeValue{"pk": strVal("p1"), "sk": strVal("s1"), "gsi_pk": strVal("G1"), "gsi_sk": strVal("a")}),
+				batchPut(map[string]types.AttributeValue{"pk": strVal("p2"), "sk": strVal("s2"), "gsi_pk": strVal("G1"), "gsi_sk": strVal("b")}),
+				batchPut(map[string]types.AttributeValue{"pk": strVal("p3"), "sk": strVal("s3")}), // sparse: not indexed
+			},
+		}})
+		if err != nil {
+			t.Fatalf("BatchWriteItem: %v", err)
+		}
+		q, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("BatchG"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    aws.String("gsi_pk = :g"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{":g": strVal("G1")},
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if q.Count != 2 {
+			t.Errorf("GSI count = %d, want 2 (sparse item not indexed)", q.Count)
+		}
+	})
+}
+
+func TestConfBatchWriteGsiDelete(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "BatchG")
+		if _, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchG": {
+				batchPut(map[string]types.AttributeValue{"pk": strVal("p1"), "sk": strVal("s1"), "gsi_pk": strVal("G1"), "gsi_sk": strVal("a")}),
+				batchPut(map[string]types.AttributeValue{"pk": strVal("p2"), "sk": strVal("s2"), "gsi_pk": strVal("G1"), "gsi_sk": strVal("b")}),
+			},
+		}}); err != nil {
+			t.Fatalf("BatchWriteItem: %v", err)
+		}
+		if _, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchG": {batchDel(map[string]types.AttributeValue{"pk": strVal("p1"), "sk": strVal("s1")})},
+		}}); err != nil {
+			t.Fatalf("BatchWriteItem delete: %v", err)
+		}
+		q, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("BatchG"),
+			IndexName:                 aws.String("gsi-all"),
+			KeyConditionExpression:    aws.String("gsi_pk = :g"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{":g": strVal("G1")},
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if q.Count != 1 {
+			t.Errorf("GSI count after delete = %d, want 1", q.Count)
+		}
+	})
+}
+
+func TestConfBatchWriteGsiOverwrite(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "BatchG")
+		putConf(t, c, ctx, "BatchG", map[string]types.AttributeValue{"pk": strVal("p1"), "sk": strVal("s1"), "gsi_pk": strVal("G1"), "gsi_sk": strVal("a")})
+
+		// Batch overwrite with CHANGED GSI key attrs: old index row must go.
+		if _, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchG": {batchPut(map[string]types.AttributeValue{"pk": strVal("p1"), "sk": strVal("s1"), "gsi_pk": strVal("G2"), "gsi_sk": strVal("b")})},
+		}}); err != nil {
+			t.Fatalf("BatchWriteItem: %v", err)
+		}
+		count := func(val string) int32 {
+			t.Helper()
+			q, err := c.Query(ctx, &dynamodb.QueryInput{
+				TableName:                 aws.String("BatchG"),
+				IndexName:                 aws.String("gsi-all"),
+				KeyConditionExpression:    aws.String("gsi_pk = :g"),
+				ExpressionAttributeValues: map[string]types.AttributeValue{":g": strVal(val)},
+			})
+			if err != nil {
+				t.Fatalf("Query %s: %v", val, err)
+			}
+			return q.Count
+		}
+		if n := count("G1"); n != 0 {
+			t.Errorf("old GSI row: count = %d, want 0 (no phantom hits)", n)
+		}
+		if n := count("G2"); n != 1 {
+			t.Errorf("new GSI row: count = %d, want 1", n)
+		}
+	})
+}
+
+func TestConfBatchWriteItemTooLarge(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchT": {
+				batchPut(map[string]types.AttributeValue{"pk": strVal("good")}),
+				batchPut(map[string]types.AttributeValue{"pk": strVal("big"), "data": strVal(strings.Repeat("x", 400*1024+1))}),
+			},
+		}})
+		asValidation(t, err, "oversized item")
+		// All-or-nothing: the valid put was not written either.
+		got, err := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("BatchT"), Key: map[string]types.AttributeValue{"pk": strVal("good")}})
+		if err != nil {
+			t.Fatalf("GetItem: %v", err)
+		}
+		if len(got.Item) != 0 {
+			t.Errorf("valid request written despite rejected batch: %v", got.Item)
+		}
+	})
+}
+
+// Confirmed permanent dual-target cases (spec §6.1; Task 1 probes returned
+// ValidationException for all three against dynamodb-local 3.3.1).
+
+func TestConfBatchWriteNeitherPutNorDelete(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchT": {types.WriteRequest{}},
+		}})
+		asValidation(t, err, "WriteRequest with neither Put nor Delete")
+	})
+}
+
+func TestConfBatchWriteBothPutAndDelete(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"BatchT": {{
+				PutRequest:    &types.PutRequest{Item: map[string]types.AttributeValue{"pk": strVal("k")}},
+				DeleteRequest: &types.DeleteRequest{Key: map[string]types.AttributeValue{"pk": strVal("k")}},
+			}},
+		}})
+		asValidation(t, err, "WriteRequest with both Put and Delete")
+	})
+}
+
+func TestConfBatchWriteEmptyTableRequests(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{"BatchT": {}}})
+		asValidation(t, err, "table with empty request list")
+	})
+}
+
+func TestConfBatchWriteEmptyTableName(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		_, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
+			"": {batchPut(map[string]types.AttributeValue{"pk": strVal("k")})},
+		}})
+		asValidation(t, err, "empty table name in batch write")
+	})
+}
+
+// =====================================================================
+// M5b — BatchGetItem conformance (dual-target)
+// =====================================================================
+
+func TestConfBatchGetMultiTable(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchA")
+		mustCreate(t, c, ctx, "BatchB")
+		putConf(t, c, ctx, "BatchA", map[string]types.AttributeValue{"pk": strVal("a1"), "v": strVal("one"), "n": numVal("12.5")})
+		putConf(t, c, ctx, "BatchB", map[string]types.AttributeValue{"pk": strVal("b1"), "v": strVal("two")})
+
+		out, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"BatchA": {Keys: []map[string]types.AttributeValue{{"pk": strVal("a1")}}},
+			"BatchB": {Keys: []map[string]types.AttributeValue{{"pk": strVal("b1")}}},
+		}})
+		if err != nil {
+			t.Fatalf("BatchGetItem: %v", err)
+		}
+		if len(out.UnprocessedKeys) != 0 {
+			t.Errorf("UnprocessedKeys = %v, want empty", out.UnprocessedKeys)
+		}
+		if len(out.Responses["BatchA"]) != 1 || len(out.Responses["BatchB"]) != 1 {
+			t.Fatalf("Responses sizes: A=%d B=%d, want 1/1", len(out.Responses["BatchA"]), len(out.Responses["BatchB"]))
+		}
+		if v := out.Responses["BatchA"][0]["n"].(*types.AttributeValueMemberN).Value; v != "12.5" {
+			t.Errorf("A item n = %q, want 12.5", v)
+		}
+		if v := out.Responses["BatchB"][0]["v"].(*types.AttributeValueMemberS).Value; v != "two" {
+			t.Errorf("B item v = %q, want two", v)
+		}
+	})
+}
+
+func TestConfBatchGetCountLimit(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+
+		mk := func(n int) []map[string]types.AttributeValue {
+			keys := make([]map[string]types.AttributeValue, 0, n)
+			for i := 0; i < n; i++ {
+				keys = append(keys, map[string]types.AttributeValue{"pk": strVal(fmt.Sprintf("k%03d", i))})
+			}
+			return keys
+		}
+		if _, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{"BatchT": {Keys: mk(100)}}}); err != nil {
+			t.Errorf("100 keys: %v", err)
+		}
+		_, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{"BatchT": {Keys: mk(101)}}})
+		asValidation(t, err, "101 keys")
+	})
+}
+
+func TestConfBatchGetNonexistentKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		putConf(t, c, ctx, "BatchT", map[string]types.AttributeValue{"pk": strVal("real")})
+
+		out, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"BatchT": {Keys: []map[string]types.AttributeValue{{"pk": strVal("real")}, {"pk": strVal("ghost")}}},
+		}})
+		if err != nil {
+			t.Fatalf("BatchGetItem: %v", err)
+		}
+		if len(out.Responses["BatchT"]) != 1 {
+			t.Fatalf("len(Responses[T]) = %d, want 1 (ghost omitted)", len(out.Responses["BatchT"]))
+		}
+		if pk := out.Responses["BatchT"][0]["pk"].(*types.AttributeValueMemberS).Value; pk != "real" {
+			t.Errorf("pk = %q, want real", pk)
+		}
+		if len(out.UnprocessedKeys) != 0 {
+			t.Errorf("UnprocessedKeys = %v, want empty (missing keys are NOT unprocessed)", out.UnprocessedKeys)
+		}
+	})
+}
+
+func TestConfBatchGetDuplicateKeys(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		_, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"BatchT": {Keys: []map[string]types.AttributeValue{{"pk": strVal("k")}, {"pk": strVal("k")}}},
+		}})
+		asValidation(t, err, "duplicate keys")
+	})
+}
+
+func TestConfBatchGetOrdering(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		for _, k := range []string{"k1", "k2", "k3", "k5"} {
+			putConf(t, c, ctx, "BatchT", map[string]types.AttributeValue{"pk": strVal(k)})
+		}
+		// Shuffled request order with an interleaved miss.
+		out, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"BatchT": {Keys: []map[string]types.AttributeValue{
+				{"pk": strVal("k3")}, {"pk": strVal("k1")}, {"pk": strVal("k5")}, {"pk": strVal("ghost")}, {"pk": strVal("k2")},
+			}},
+		}})
+		if err != nil {
+			t.Fatalf("BatchGetItem: %v", err)
+		}
+		// dynamodb-local returns the four found keys in an arbitrary internal
+		// (non-sorted, non-request) order; the mock deterministically sorts.
+		// Both agree on the SET of returned keys with the ghost omitted, so
+		// assert the set, not the order (order is not a dynamodb-local contract).
+		want := map[string]bool{"k1": true, "k2": true, "k3": true, "k5": true}
+		got := out.Responses["BatchT"]
+		if len(got) != len(want) {
+			t.Fatalf("len(Responses[T]) = %d, want %d", len(got), len(want))
+		}
+		gotSet := map[string]bool{}
+		for _, it := range got {
+			gotSet[it["pk"].(*types.AttributeValueMemberS).Value] = true
+		}
+		for w := range want {
+			if !gotSet[w] {
+				t.Errorf("Responses[T] missing requested key %q (ghost must be omitted); got %v", w, gotSet)
+			}
+		}
+	})
+}
+
+func TestConfBatchGetUnknownTable(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "Good")
+		_, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"Good": {Keys: []map[string]types.AttributeValue{{"pk": strVal("k")}}},
+			"Nope": {Keys: []map[string]types.AttributeValue{{"pk": strVal("k")}}},
+		}})
+		asResourceNotFound(t, err, "unknown table in batch")
+	})
+}
+
+func TestConfBatchGetConsistentReadPerTable(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchA")
+		mustCreate(t, c, ctx, "BatchB")
+		putConf(t, c, ctx, "BatchA", map[string]types.AttributeValue{"pk": strVal("a1")})
+		putConf(t, c, ctx, "BatchB", map[string]types.AttributeValue{"pk": strVal("b1")})
+
+		out, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"BatchA": {Keys: []map[string]types.AttributeValue{{"pk": strVal("a1")}}, ConsistentRead: aws.Bool(true)},
+			"BatchB": {Keys: []map[string]types.AttributeValue{{"pk": strVal("b1")}}},
+		}})
+		if err != nil {
+			t.Fatalf("BatchGetItem: %v", err)
+		}
+		if len(out.Responses["BatchA"]) != 1 || len(out.Responses["BatchB"]) != 1 {
+			t.Errorf("Responses sizes: A=%d B=%d, want 1/1", len(out.Responses["BatchA"]), len(out.Responses["BatchB"]))
+		}
+	})
+}
+
+func TestConfBatchGetCompositeKeys(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "BatchT") // pk HASH S, sk RANGE N
+		key := func(sk string) map[string]types.AttributeValue {
+			return map[string]types.AttributeValue{"pk": strVal("p1"), "sk": numVal(sk)}
+		}
+		putConf(t, c, ctx, "BatchT", map[string]types.AttributeValue{"pk": strVal("p1"), "sk": numVal("1")})
+		putConf(t, c, ctx, "BatchT", map[string]types.AttributeValue{"pk": strVal("p1"), "sk": numVal("2")})
+
+		out, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"BatchT": {Keys: []map[string]types.AttributeValue{key("1"), key("99"), key("2")}},
+		}})
+		if err != nil {
+			t.Fatalf("BatchGetItem: %v", err)
+		}
+		if len(out.Responses["BatchT"]) != 2 {
+			t.Errorf("len(Responses[T]) = %d, want 2 (missing (p1,99) omitted)", len(out.Responses["BatchT"]))
+		}
+	})
+}
+
+func TestConfBatchGetEmptyRequestItems(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		_, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{}})
+		asValidation(t, err, "empty RequestItems")
+	})
+}
+
+func TestConfBatchGetAllMissTableOmitted(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchA")
+		mustCreate(t, c, ctx, "BatchB")
+		putConf(t, c, ctx, "BatchA", map[string]types.AttributeValue{"pk": strVal("a1")})
+
+		out, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"BatchA": {Keys: []map[string]types.AttributeValue{{"pk": strVal("a1")}}},
+			"BatchB": {Keys: []map[string]types.AttributeValue{{"pk": strVal("ghost")}}},
+		}})
+		if err != nil {
+			t.Fatalf("BatchGetItem: %v", err)
+		}
+		if len(out.Responses["BatchA"]) != 1 {
+			t.Errorf("len(Responses[A]) = %d, want 1", len(out.Responses["BatchA"]))
+		}
+		if len(out.Responses["BatchB"]) != 0 {
+			t.Errorf("len(Responses[B]) = %d, want 0 (empty entry, matching dynamodb-local)", len(out.Responses["BatchB"]))
+		}
+	})
+}
+
+// Confirmed permanent dual-target (spec §2.4; Task 1 probe returned
+// ValidationException for empty Keys against dynamodb-local 3.3.1).
+func TestConfBatchGetEmptyTableKeys(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		_, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"BatchT": {Keys: []map[string]types.AttributeValue{}},
+		}})
+		asValidation(t, err, "table with empty Keys list")
+	})
+}
+
+func TestConfBatchGetEmptyTableName(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		_, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"": {Keys: []map[string]types.AttributeValue{{"pk": strVal("k")}}},
+		}})
+		asValidation(t, err, "empty table name in batch get")
+	})
+}
+
+// §6.4: TTL Faithful read model — expired items are visible to BatchGetItem.
+func TestConfBatchGetExpiredItemVisible(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+
+		if _, err := c.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
+			TableName:               aws.String("BatchT"),
+			TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(true), AttributeName: aws.String("expire")},
+		}); err != nil {
+			t.Fatalf("UpdateTimeToLive: %v", err)
+		}
+		past := strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10)
+		putConf(t, c, ctx, "BatchT", map[string]types.AttributeValue{"pk": strVal("k"), "expire": numVal(past)})
+
+		out, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"BatchT": {Keys: []map[string]types.AttributeValue{{"pk": strVal("k")}}},
+		}})
+		if err != nil {
+			t.Fatalf("BatchGetItem: %v", err)
+		}
+		if len(out.Responses["BatchT"]) != 1 {
+			t.Errorf("len(Responses[T]) = %d, want 1 (expired item visible, M5a Faithful model)", len(out.Responses["BatchT"]))
+		}
+	})
 }

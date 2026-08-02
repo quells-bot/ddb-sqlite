@@ -204,6 +204,16 @@ func (s *Store) TableExists(tx *sql.Tx, name string) (bool, error) {
 	return true, nil
 }
 
+// UpdateTableTTL sets the TTL attribute name for a table. An empty ttlAttr
+// disables TTL (sets the catalog column to NULL). This is the first
+// catalog-mutate method beyond insert/get/delete.
+func (s *Store) UpdateTableTTL(tx *sql.Tx, tableID int64, ttlAttr string) error {
+	if _, err := tx.Exec(`UPDATE ddb_table_defs SET ttl = ? WHERE id = ?`, nilIfEmpty(ttlAttr), tableID); err != nil {
+		return fmt.Errorf("storage: update table ttl: %w", err)
+	}
+	return nil
+}
+
 func scanDefs(rows *sql.Rows) ([]TableDef, error) {
 	var out []TableDef
 	for rows.Next() {
