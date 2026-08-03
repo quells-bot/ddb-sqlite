@@ -20,7 +20,7 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/ory/dockertest/v4"
 
-	"github.com/quells-bot/ddb-sqlite/awsdynamodb"
+	"github.com/quells-bot/ddb-sqlite-core/awsdynamodb"
 )
 
 // api is the minimal interface (exact SDK method signatures) both *dynamodb.Client
@@ -31,6 +31,7 @@ type api interface {
 	DescribeTable(ctx context.Context, params *dynamodb.DescribeTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error)
 	ListTables(ctx context.Context, params *dynamodb.ListTablesInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ListTablesOutput, error)
 	DeleteTable(ctx context.Context, params *dynamodb.DeleteTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteTableOutput, error)
+	UpdateTable(ctx context.Context, params *dynamodb.UpdateTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateTableOutput, error)
 	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 	GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
@@ -392,6 +393,22 @@ func asValidation(t *testing.T, err error, msg string) {
 	}
 }
 
+func asResourceInUse(t *testing.T, err error, msg string) {
+	t.Helper()
+	var e *types.ResourceInUseException
+	if !errors.As(err, &e) {
+		t.Errorf("%s: err = %v, want ResourceInUseException", msg, err)
+	}
+}
+
+func asLimitExceeded(t *testing.T, err error, msg string) {
+	t.Helper()
+	var e *types.LimitExceededException
+	if !errors.As(err, &e) {
+		t.Errorf("%s: err = %v, want LimitExceededException", msg, err)
+	}
+}
+
 // --- M1 conformance cases (all written against api) ---
 
 func TestConfCreateTableDescribeTable(t *testing.T) {
@@ -433,6 +450,70 @@ func TestConfListTables(t *testing.T) {
 		}
 		if out2.LastEvaluatedTableName != nil {
 			t.Errorf("LastEvaluated = %v, want nil", out2.LastEvaluatedTableName)
+		}
+	})
+}
+
+// W8 #7: ListTables with Limit == table count returns all tables and does NOT
+// set LastEvaluatedTableName (P-misc probe; closes M3 §9.2 risk 6).
+func TestConfListTablesLimitEqualsCount(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		for _, n := range []string{"alpha", "bravo", "charlie"} {
+			mustCreate(t, c, ctx, n)
+		}
+		out, err := c.ListTables(ctx, &dynamodb.ListTablesInput{Limit: aws.Int32(3)})
+		if err != nil {
+			t.Fatalf("ListTables: %v", err)
+		}
+		if len(out.TableNames) != 3 {
+			t.Errorf("TableNames = %v, want all 3", out.TableNames)
+		}
+		if out.LastEvaluatedTableName != nil {
+			t.Errorf("LastEvaluatedTableName = %q, want nil when Limit == table count",
+				aws.ToString(out.LastEvaluatedTableName))
+		}
+	})
+}
+
+// W8 #9: a GSI named identically to its table is accepted at CreateTable and
+// is usable (P-misc probe: no collision validation exists or is needed).
+func TestConfGsiSameNameAsTable(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		_, err := c.CreateTable(ctx, &dynamodb.CreateTableInput{
+			TableName: aws.String("SameName"),
+			KeySchema: []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+			AttributeDefinitions: []types.AttributeDefinition{
+				{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+				{AttributeName: aws.String("gk"), AttributeType: types.ScalarAttributeTypeS},
+			},
+			GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{{
+				IndexName:  aws.String("SameName"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("gk"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll},
+			}},
+			BillingMode: types.BillingModePayPerRequest,
+		})
+		if err != nil {
+			t.Fatalf("CreateTable with same-name GSI: %v", err)
+		}
+
+		putConf(t, c, ctx, "SameName", map[string]types.AttributeValue{"pk": strVal("k"), "gk": strVal("g")})
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(
+			expression.Key("gk").Equal(expression.Value("g"))))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("SameName"),
+			IndexName:                 aws.String("SameName"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query same-name GSI: %v", err)
+		}
+		if out.Count != 1 {
+			t.Errorf("Count = %d, want 1", out.Count)
 		}
 	})
 }
@@ -527,11 +608,68 @@ func TestConfPutItemSizeLimit(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
 		mustCreate(t, c, ctx, "Tbl")
+
+		// Exactly 409600 bytes by AWS accounting: accepted (probe-verified).
+		// {pk:"k", big:S(409594)} = 2+1 + 3+409594 = 409600.
 		_, err := c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("Tbl"), Item: map[string]types.AttributeValue{
-			"pk":   strVal("k"),
-			"data": strVal(strings.Repeat("x", 400*1024+1)),
+			"pk":  strVal("k"),
+			"big": strVal(strings.Repeat("x", 409594)),
 		}})
-		asValidation(t, err, "oversized item")
+		if err != nil {
+			t.Fatalf("exact-boundary item: err = %v, want nil", err)
+		}
+
+		// 409601 bytes: rejected.
+		_, err = c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("Tbl"), Item: map[string]types.AttributeValue{
+			"pk":  strVal("k2"),
+			"big": strVal(strings.Repeat("x", 409595)),
+		}})
+		asValidation(t, err, "item size")
+	})
+}
+
+func TestConfPutItemNumberSize(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "NumSz")
+
+		// A 38-significant-digit number contributes 20 bytes (ceil(38/2)+1).
+		// Fill the rest with a string to hit exactly 409600:
+		// "pk"=2+"k"=1 + "n"=1+20 + "pad"=3+str = 409600 -> str=409573.
+		_, err := c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("NumSz"), Item: map[string]types.AttributeValue{
+			"pk":  strVal("k"),
+			"n":   &types.AttributeValueMemberN{Value: "99999999999999999999999999999999999999"},
+			"pad": strVal(strings.Repeat("x", 409573)),
+		}})
+		if err != nil {
+			t.Fatalf("38-digit number exact boundary: err = %v", err)
+		}
+
+		// One more byte of string: 409601 -> rejected.
+		_, err = c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("NumSz"), Item: map[string]types.AttributeValue{
+			"pk":  strVal("k2"),
+			"n":   &types.AttributeValueMemberN{Value: "99999999999999999999999999999999999999"},
+			"pad": strVal(strings.Repeat("x", 409574)),
+		}})
+		asValidation(t, err, "item size")
+	})
+}
+
+func TestConfPutItemDepthLimit(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "Dpth")
+
+		// 33-level-deep nested map (2-deep base 'leaf' + 32 wraps = depth 34) -> rejected.
+		inner := map[string]types.AttributeValue{"leaf": strVal("x")}
+		for range 32 {
+			inner = map[string]types.AttributeValue{"d": &types.AttributeValueMemberM{Value: inner}}
+		}
+		_, err := c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("Dpth"), Item: map[string]types.AttributeValue{
+			"pk":   strVal("k"),
+			"nest": &types.AttributeValueMemberM{Value: inner},
+		}})
+		asValidation(t, err, "nesting depth")
 	})
 }
 
@@ -921,6 +1059,227 @@ func TestConfBetweenReversedBounds(t *testing.T) {
 			ExpressionAttributeValues: map[string]types.AttributeValue{":lo": numVal("10"), ":hi": numVal("100")},
 		})
 		asValidation(t, err, "BETWEEN with reversed bounds")
+	})
+}
+
+// condCase is one condition-semantics assertion observed through a PutItem
+// ConditionExpression: want=true expects the put to succeed, want=false
+// expects ConditionalCheckFailedException.
+type condCase struct {
+	name   string
+	cond   string
+	names  map[string]string
+	values map[string]types.AttributeValue
+	want   bool
+}
+
+// runCondCases evaluates each case against table by re-putting the fixture's
+// key under the condition. A satisfied condition overwrites the fixture, so
+// seed is restored after every success.
+func runCondCases(t *testing.T, c api, ctx context.Context, table string, seed map[string]types.AttributeValue, cases []condCase) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := c.PutItem(ctx, &dynamodb.PutItemInput{
+				TableName:                 aws.String(table),
+				Item:                      map[string]types.AttributeValue{"pk": strVal("k")},
+				ConditionExpression:       aws.String(tc.cond),
+				ExpressionAttributeNames:  tc.names,
+				ExpressionAttributeValues: tc.values,
+			})
+			if tc.want {
+				if err != nil {
+					t.Fatalf("condition should have been satisfied: %v", err)
+				}
+				putConf(t, c, ctx, table, seed)
+				return
+			}
+			asConditionalCheckFailed(t, err, tc.name)
+		})
+	}
+}
+
+// W8 #1: null-valued vs missing attributes in conditions, filters, and
+// projections. Every expectation measured against dynamodb-local 3.3.1.
+func TestConfNullVsMissing(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "NullMiss")
+		putConf(t, c, ctx, "NullMiss", seedSemItem())
+
+		svMap := func(s string) map[string]types.AttributeValue {
+			return map[string]types.AttributeValue{":v": strVal(s)}
+		}
+		nullName := map[string]string{"#z": "null"} // "null" is a reserved word
+		runCondCases(t, c, ctx, "NullMiss", seedSemItem(), []condCase{
+			{"nested missing equality is false", "m.nope = :v", nil, svMap("z"), false},
+			{"nested missing inequality is true", "m.nope <> :v", nil, svMap("z"), true},
+			{"deep missing path equality is false", "nope.deep.nest = :v", nil, svMap("z"), false},
+			{"scalar descent equality is false", "s.deeper = :v", nil, svMap("z"), false},
+			{"list index past end equality is false", "l[5] = :v", nil, svMap("z"), false},
+			{"list index past end inequality is true", "l[5] <> :v", nil, svMap("z"), true},
+			{"null ordering is false", "#z < :v", nullName, svMap("z"), false},
+			{"null inequality is true", "#z <> :v", nullName, svMap("z"), true},
+			{"size of missing path is false", "size(nope) = :v", nil, map[string]types.AttributeValue{":v": numVal("0")}, false},
+			{"contains on missing path is false", "contains(nope, :v)", nil, svMap("x"), false},
+		})
+
+		// Filters: a missing-path equality consumes read budget but returns
+		// nothing; the inequality passes every scanned item.
+		scan, err := c.Scan(ctx, &dynamodb.ScanInput{
+			TableName:                 aws.String("NullMiss"),
+			FilterExpression:          aws.String("#x = :v"),
+			ExpressionAttributeNames:  map[string]string{"#x": "nope"},
+			ExpressionAttributeValues: map[string]types.AttributeValue{":v": strVal("x")},
+		})
+		if err != nil {
+			t.Fatalf("Scan filter =: %v", err)
+		}
+		if scan.Count != 0 || scan.ScannedCount != 1 {
+			t.Errorf("filter =: Count=%d ScannedCount=%d, want 0/1", scan.Count, scan.ScannedCount)
+		}
+		scan, err = c.Scan(ctx, &dynamodb.ScanInput{
+			TableName:                 aws.String("NullMiss"),
+			FilterExpression:          aws.String("#x <> :v"),
+			ExpressionAttributeNames:  map[string]string{"#x": "nope"},
+			ExpressionAttributeValues: map[string]types.AttributeValue{":v": strVal("x")},
+		})
+		if err != nil {
+			t.Fatalf("Scan filter <>: %v", err)
+		}
+		if scan.Count != 1 || scan.ScannedCount != 1 {
+			t.Errorf("filter <>: Count=%d ScannedCount=%d, want 1/1", scan.Count, scan.ScannedCount)
+		}
+
+		// Projection of a NULL-valued attribute returns it as NULL.
+		got, err := c.GetItem(ctx, &dynamodb.GetItemInput{
+			TableName:                aws.String("NullMiss"),
+			Key:                      map[string]types.AttributeValue{"pk": strVal("k")},
+			ProjectionExpression:     aws.String("#z"),
+			ExpressionAttributeNames: map[string]string{"#z": "null"},
+		})
+		if err != nil {
+			t.Fatalf("GetItem projection: %v", err)
+		}
+		if _, ok := got.Item["null"].(*types.AttributeValueMemberNULL); !ok {
+			t.Errorf("projected null attr = %v, want AttributeValueMemberNULL", got.Item["null"])
+		}
+	})
+}
+
+// W8 #2: type-mismatched comparisons are false (or true for <>) — never an
+// error — when the *operand* is a valid scalar/set type for its operator.
+// Ordering operators with non-scalar *operands* are Task 5. Every expectation
+// measured against dynamodb-local 3.3.1.
+func TestConfTypeMismatchComparisons(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TypeMM")
+		putConf(t, c, ctx, "TypeMM", seedSemItem())
+
+		nullV := &types.AttributeValueMemberNULL{Value: true}
+		boolT := &types.AttributeValueMemberBOOL{Value: true}
+		ssBA := &types.AttributeValueMemberSS{Value: []string{"b", "a"}}
+		ssAB := &types.AttributeValueMemberSS{Value: []string{"a", "b"}}
+		ssA := &types.AttributeValueMemberSS{Value: []string{"a"}}
+		listV := &types.AttributeValueMemberL{Value: []types.AttributeValue{strVal("x"), numVal("7")}}
+		mapV := &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{"inner": strVal("deep")}}
+		vals := func(v types.AttributeValue) map[string]types.AttributeValue {
+			return map[string]types.AttributeValue{":v": v}
+		}
+		bounds := func(lo, hi types.AttributeValue) map[string]types.AttributeValue {
+			return map[string]types.AttributeValue{":lo": lo, ":hi": hi}
+		}
+
+		runCondCases(t, c, ctx, "TypeMM", seedSemItem(), []condCase{
+			// BETWEEN: attribute type != bounds type is false, not an error.
+			// (Mixed-type bounds — S lo + N hi — are ValidationException, pinned
+			// by TestConfBetweenMixedBoundTypes.)
+			{"between: string attr, number bounds", "s BETWEEN :lo AND :hi", nil, bounds(numVal("1"), numVal("9")), false},
+			{"between: number attr, string bounds", "n BETWEEN :lo AND :hi", nil, bounds(strVal("a"), strVal("z")), false},
+			{"between: bool attr, number bounds", "bool BETWEEN :lo AND :hi", nil, bounds(numVal("1"), numVal("9")), false},
+
+			// IN: mismatched operands are skipped, never an error.
+			{"in: all operands mismatched", "s IN (:lo, :hi)", nil, bounds(numVal("1"), numVal("2")), false},
+			{"in: skips mismatched operands", "s IN (:lo, :hi)", nil, bounds(numVal("1"), strVal("hello")), true},
+			{"in: set operand matches", "ss IN (:v)", nil, vals(ssAB), true},
+			{"in: bool operand matches", "bool IN (:v)", nil, vals(boolT), true},
+			{"in: null operand is false", "s IN (:v)", nil, vals(nullV), false},
+
+			// Equality is deep and set-order-insensitive; cross-type is false.
+			{"set equality is order-insensitive", "ss = :v", nil, vals(ssBA), true},
+			{"set subset equality is false", "ss = :v", nil, vals(ssA), false},
+			{"list equality", "l = :v", nil, vals(listV), true},
+			{"map equality", "m = :v", nil, vals(mapV), true},
+			{"set vs scalar equality is false", "ss = :v", nil, vals(strVal("a")), false},
+			{"list vs scalar equality is false", "l = :v", nil, vals(strVal("x")), false},
+			{"bool vs number equality is false", "bool = :v", nil, vals(numVal("1")), false},
+			{"bool vs number inequality is true", "bool <> :v", nil, vals(numVal("1")), true},
+			{"map vs string inequality is true", "m <> :v", nil, vals(strVal("z")), true},
+
+			// Ordering against a non-scalar *attribute* (scalar operand) is false.
+			{"ordering: bool attr", "bool < :v", nil, vals(strVal("z")), false},
+			{"ordering: set attr", "ss < :v", nil, vals(strVal("z")), false},
+			{"ordering: list attr", "l <= :v", nil, vals(strVal("z")), false},
+			{"ordering: map attr", "m >= :v", nil, vals(strVal("z")), false},
+		})
+	})
+}
+
+// W8 #2: ordering comparators and BETWEEN reject a non-scalar :value operand
+// (anything but S, N, B) with ValidationException — at request time, even when
+// the compared attribute is missing. Measured against dynamodb-local 3.3.1.
+func TestConfOrderingOperandTypeValidation(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "OrdOp")
+		putConf(t, c, ctx, "OrdOp", seedSemItem())
+
+		vals := func(v types.AttributeValue) map[string]types.AttributeValue {
+			return map[string]types.AttributeValue{":v": v}
+		}
+		bounds := func(lo, hi types.AttributeValue) map[string]types.AttributeValue {
+			return map[string]types.AttributeValue{":lo": lo, ":hi": hi}
+		}
+		boolT := &types.AttributeValueMemberBOOL{Value: true}
+		nullV := &types.AttributeValueMemberNULL{Value: true}
+		listV := &types.AttributeValueMemberL{Value: []types.AttributeValue{strVal("x")}}
+		ssV := &types.AttributeValueMemberSS{Value: []string{"a"}}
+
+		cases := []struct {
+			name   string
+			cond   string
+			names  map[string]string
+			values map[string]types.AttributeValue
+		}{
+			{"less than bool operand", "s < :v", nil, vals(boolT)},
+			{"less than list operand", "s < :v", nil, vals(listV)},
+			{"less than string-set operand", "s < :v", nil, vals(ssV)},
+			{"less-equal null operand on null attr", "#z <= :v", map[string]string{"#z": "null"}, vals(nullV)},
+			{"between null bounds", "n BETWEEN :lo AND :hi", nil, bounds(nullV, nullV)},
+			{"between bool bounds", "n BETWEEN :lo AND :hi", nil, bounds(boolT, boolT)},
+			{"ordering null operand, missing attr", "nope < :v", nil, vals(nullV)},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				_, err := c.PutItem(ctx, &dynamodb.PutItemInput{
+					TableName:                 aws.String("OrdOp"),
+					Item:                      map[string]types.AttributeValue{"pk": strVal("k")},
+					ConditionExpression:       aws.String(tc.cond),
+					ExpressionAttributeNames:  tc.names,
+					ExpressionAttributeValues: tc.values,
+				})
+				asValidation(t, err, tc.name)
+			})
+		}
+
+		// The same rejection fires on the read path (FilterExpression).
+		_, err := c.Scan(ctx, &dynamodb.ScanInput{
+			TableName:                 aws.String("OrdOp"),
+			FilterExpression:          aws.String("s < :v"),
+			ExpressionAttributeValues: vals(boolT),
+		})
+		asValidation(t, err, "filter with bool ordering operand")
 	})
 }
 
@@ -2697,6 +3056,93 @@ func TestConfScanPagination(t *testing.T) {
 	})
 }
 
+// W8 #4: a Scan whose Limit lands exactly on the result boundary stops with
+// reason "Limit reached" — LEK is set — and resuming yields an empty trailing
+// page with LEK nil (the M3 stop-reason contract, Scan side).
+func TestConfScanTrailingEmptyPage(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 10)
+
+		out, err := c.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String("ConfT"), Limit: aws.Int32(10)})
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if out.Count != 10 || out.ScannedCount != 10 {
+			t.Errorf("Count=%d ScannedCount=%d, want 10/10", out.Count, out.ScannedCount)
+		}
+		if out.LastEvaluatedKey == nil {
+			t.Fatal("LEK = nil, want non-nil (ScannedCount == Limit)")
+		}
+
+		out2, err := c.Scan(ctx, &dynamodb.ScanInput{
+			TableName:         aws.String("ConfT"),
+			Limit:             aws.Int32(10),
+			ExclusiveStartKey: out.LastEvaluatedKey,
+		})
+		if err != nil {
+			t.Fatalf("Scan resume: %v", err)
+		}
+		if out2.Count != 0 || out2.ScannedCount != 0 {
+			t.Errorf("trailing page Count=%d ScannedCount=%d, want 0/0", out2.Count, out2.ScannedCount)
+		}
+		if out2.LastEvaluatedKey != nil {
+			t.Errorf("trailing page LEK = %v, want nil", out2.LastEvaluatedKey)
+		}
+	})
+}
+
+// W8 #5: resuming from a LEK that sits exactly on a partition boundary loses
+// and repeats nothing — pages of 5, 5, then the empty terminator over two
+// partitions of five items each.
+func TestConfScanResumePartitionBoundary(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 5)
+		seedComposite(t, c, ctx, "ConfT", "p2", 5)
+
+		seen := map[string]int{} // "pk/sk" -> times returned
+		var start map[string]types.AttributeValue
+		pages := 0
+		for {
+			out, err := c.Scan(ctx, &dynamodb.ScanInput{
+				TableName:         aws.String("ConfT"),
+				Limit:             aws.Int32(5),
+				ExclusiveStartKey: start,
+			})
+			if err != nil {
+				t.Fatalf("Scan page %d: %v", pages+1, err)
+			}
+			pages++
+			for _, it := range out.Items {
+				pk := it["pk"].(*types.AttributeValueMemberS).Value
+				sk := it["sk"].(*types.AttributeValueMemberN).Value
+				seen[pk+"/"+sk]++
+			}
+			if out.LastEvaluatedKey == nil {
+				break
+			}
+			start = out.LastEvaluatedKey
+			if pages > 4 {
+				t.Fatal("pagination did not terminate after 4 pages")
+			}
+		}
+		if pages != 3 {
+			t.Errorf("pages = %d, want 3 (5, 5, empty terminator)", pages)
+		}
+		if len(seen) != 10 {
+			t.Errorf("distinct items = %d, want 10", len(seen))
+		}
+		for k, n := range seen {
+			if n != 1 {
+				t.Errorf("item %s returned %d times, want exactly 1", k, n)
+			}
+		}
+	})
+}
+
 // TestConfParallelScan (case 27) verifies that a scan split into TotalSegments
 // disjoint segments returns, in union, exactly the full item set, with every
 // item appearing in precisely one segment (no overlap, no omission).
@@ -3468,6 +3914,61 @@ func TestConfGSIProjectionInclude(t *testing.T) {
 	})
 }
 
+// Nested INCLUDE (M6c W4, probe P-include): a NonKeyAttributes entry that is
+// a document path ("obj.a") is accepted at CreateTable but never projected —
+// the read-time trim keeps top-level names only, so the item's "obj"
+// attribute is absent from GSI reads. dynamodb-local 3.3.1 behaves
+// identically; this case pins the match dual-target.
+func TestConfGSINestedInclude(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		_, err := c.CreateTable(ctx, &dynamodb.CreateTableInput{
+			TableName: aws.String("NestIncl"),
+			KeySchema: []types.KeySchemaElement{
+				{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash},
+				{AttributeName: aws.String("sk"), KeyType: types.KeyTypeRange},
+			},
+			AttributeDefinitions: []types.AttributeDefinition{
+				{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+				{AttributeName: aws.String("sk"), AttributeType: types.ScalarAttributeTypeS},
+				{AttributeName: aws.String("gk"), AttributeType: types.ScalarAttributeTypeS},
+			},
+			GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{{
+				IndexName:  aws.String("gsi-nest"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("gk"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeInclude, NonKeyAttributes: []string{"obj.a"}},
+			}},
+			BillingMode: types.BillingModePayPerRequest,
+		})
+		if err != nil {
+			t.Fatalf("CreateTable with nested INCLUDE entry: %v", err)
+		}
+		putConf(t, c, ctx, "NestIncl", map[string]types.AttributeValue{
+			"pk":  sv("P1"),
+			"sk":  sv("S1"),
+			"gk":  sv("G1"),
+			"obj": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{"a": sv("aval")}},
+		})
+
+		keyExpr := expression.Key("gk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("NestIncl"),
+			IndexName:                 aws.String("gsi-nest"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(out.Items) != 1 {
+			t.Fatalf("got %d items, want 1", len(out.Items))
+		}
+		wantAttrNames(t, out.Items[0], []string{"gk", "pk", "sk"}, "nested INCLUDE item")
+	})
+}
+
 // Case 47: ALL projection — a query on gsi-all returns every attribute.
 func TestConfGSIProjectionAll(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -3719,6 +4220,81 @@ func TestConfGSIUpdateRemovesKey(t *testing.T) {
 			t.Fatalf("Query: %v", err)
 		}
 		wantSet(t, out.Items, "A", "C") // B is now sparse
+	})
+}
+
+// W8 #3: sparse GSI items are ordinary items — updatable while absent from
+// the index, moved into the index by setting the GSI key attributes, and back
+// out by removing the composite sort key.
+func TestConfGSISparseUpdate(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfT")
+
+		// Sparse item: no GSI key attributes.
+		putConf(t, c, ctx, "ConfT", map[string]types.AttributeValue{"pk": sv("D"), "sk": sv("d")})
+
+		update := func(u expression.UpdateBuilder) {
+			t.Helper()
+			uexpr := mustExpr(t, expression.NewBuilder().WithUpdate(u))
+			if _, err := c.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+				TableName:                 aws.String("ConfT"),
+				Key:                       map[string]types.AttributeValue{"pk": sv("D"), "sk": sv("d")},
+				UpdateExpression:          uexpr.Update(),
+				ExpressionAttributeNames:  uexpr.Names(),
+				ExpressionAttributeValues: uexpr.Values(),
+			}); err != nil {
+				t.Fatalf("UpdateItem: %v", err)
+			}
+		}
+		queryG9 := func() []map[string]types.AttributeValue {
+			t.Helper()
+			kexpr := mustExpr(t, expression.NewBuilder().WithKeyCondition(
+				expression.Key("gsi_pk").Equal(expression.Value("G9"))))
+			out, err := c.Query(ctx, &dynamodb.QueryInput{
+				TableName:                 aws.String("ConfT"),
+				IndexName:                 aws.String("gsi-all"),
+				KeyConditionExpression:    kexpr.KeyCondition(),
+				ExpressionAttributeNames:  kexpr.Names(),
+				ExpressionAttributeValues: kexpr.Values(),
+			})
+			if err != nil {
+				t.Fatalf("Query gsi-all: %v", err)
+			}
+			return out.Items
+		}
+
+		// A non-key update succeeds and keeps the item out of the index.
+		update(expression.Set(expression.Name("proj1"), expression.Value("p")))
+		scan, err := c.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String("ConfT"), IndexName: aws.String("gsi-all")})
+		if err != nil {
+			t.Fatalf("Scan gsi-all: %v", err)
+		}
+		if itemSet(scan.Items)["D"] {
+			t.Error("sparse item D present in gsi-all after non-key update")
+		}
+
+		// Setting both GSI key attributes moves the item into the index.
+		update(expression.Set(expression.Name("gsi_pk"), expression.Value("G9")).
+			Set(expression.Name("gsi_sk"), expression.Value("s9")))
+		wantSet(t, queryG9(), "D")
+
+		// Removing the composite GSI's sort key takes the item back out.
+		update(expression.Remove(expression.Name("gsi_sk")))
+		if items := queryG9(); len(items) != 0 {
+			t.Errorf("after REMOVE gsi_sk, gsi_pk=G9 returned %v, want empty", itemSet(items))
+		}
+		// The item itself is intact.
+		got, err := c.GetItem(ctx, &dynamodb.GetItemInput{
+			TableName: aws.String("ConfT"),
+			Key:       map[string]types.AttributeValue{"pk": sv("D"), "sk": sv("d")},
+		})
+		if err != nil {
+			t.Fatalf("GetItem: %v", err)
+		}
+		if got.Item == nil {
+			t.Error("GetItem D = nil, want present (only the index entry is gone)")
+		}
 	})
 }
 
@@ -5217,6 +5793,1621 @@ func TestConfBatchGetExpiredItemVisible(t *testing.T) {
 		}
 		if len(out.Responses["BatchT"]) != 1 {
 			t.Errorf("len(Responses[T]) = %d, want 1 (expired item visible, M5a Faithful model)", len(out.Responses["BatchT"]))
+		}
+	})
+}
+
+// =====================================================================
+// M6B — BatchGetItem projection conformance (spec §6.4)
+// =====================================================================
+
+func TestConfBatchGetProjection(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		putConf(t, c, ctx, "BatchT", map[string]types.AttributeValue{"pk": strVal("k1"), "v": strVal("one"), "n": numVal("12.5")})
+
+		out, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"BatchT": {
+				Keys:                 []map[string]types.AttributeValue{{"pk": strVal("k1")}},
+				ProjectionExpression: aws.String("v"),
+			},
+		}})
+		if err != nil {
+			t.Fatalf("BatchGetItem: %v", err)
+		}
+		got := out.Responses["BatchT"]
+		if len(got) != 1 {
+			t.Fatalf("len(Responses[BatchT]) = %d, want 1", len(got))
+		}
+		if len(got[0]) != 1 || got[0]["v"].(*types.AttributeValueMemberS).Value != "one" {
+			t.Errorf("item = %v, want only {v:one} (keys not auto-returned)", got[0])
+		}
+	})
+}
+
+func TestConfBatchGetProjectionNameSubstitution(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		putConf(t, c, ctx, "BatchT", map[string]types.AttributeValue{"pk": strVal("k1"), "v": strVal("one"), "n": numVal("12.5")})
+
+		out, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"BatchT": {
+				Keys:                     []map[string]types.AttributeValue{{"pk": strVal("k1")}},
+				ProjectionExpression:     aws.String("#x, n"),
+				ExpressionAttributeNames: map[string]string{"#x": "v"},
+			},
+		}})
+		if err != nil {
+			t.Fatalf("BatchGetItem: %v", err)
+		}
+		got := out.Responses["BatchT"]
+		if len(got) != 1 || len(got[0]) != 2 {
+			t.Fatalf("item = %v, want one {v, n} item", got)
+		}
+		if got[0]["v"].(*types.AttributeValueMemberS).Value != "one" || got[0]["n"].(*types.AttributeValueMemberN).Value != "12.5" {
+			t.Errorf("item = %v, want {v:one, n:12.5}", got[0])
+		}
+	})
+}
+
+func TestConfBatchGetExpressionNamesWithoutProjection(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "BatchT")
+		_, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"BatchT": {
+				Keys:                     []map[string]types.AttributeValue{{"pk": strVal("k1")}},
+				ExpressionAttributeNames: map[string]string{"#x": "v"},
+			},
+		}})
+		asValidation(t, err, "ExpressionAttributeNames without projection (unused)")
+	})
+}
+
+// --- M6c W6: BatchGetItem 16MiB response cap ---
+
+// seedCapItems writes n {"pk","big"} items (k00..k{n-1}) to table in
+// BatchWriteItem chunks of 25. Each item's W1 accounting size is exactly
+// 8+payloadLen bytes (len("pk")+3 for the key, len("big")+payloadLen).
+func seedCapItems(t *testing.T, c api, ctx context.Context, table string, n, payloadLen int) {
+	t.Helper()
+	payload := strings.Repeat("x", payloadLen)
+	for start := 0; start < n; start += 25 {
+		end := start + 25
+		if end > n {
+			end = n
+		}
+		reqs := make([]types.WriteRequest, 0, end-start)
+		for i := start; i < end; i++ {
+			reqs = append(reqs, batchPut(map[string]types.AttributeValue{
+				"pk":  strVal(fmt.Sprintf("k%02d", i)),
+				"big": strVal(payload),
+			}))
+		}
+		if _, err := c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{table: reqs}}); err != nil {
+			t.Fatalf("BatchWriteItem seed: %v", err)
+		}
+	}
+}
+
+// capKeys builds n SDK request keys k00..k{n-1}.
+func capKeys(n int) []map[string]types.AttributeValue {
+	keys := make([]map[string]types.AttributeValue, 0, n)
+	for i := 0; i < n; i++ {
+		keys = append(keys, map[string]types.AttributeValue{"pk": strVal(fmt.Sprintf("k%02d", i))})
+	}
+	return keys
+}
+
+// 100 items over the 16MiB cap: floor(16MiB / per-item) returned, the rest
+// spilled. Counts only — the spilled key set is not a stable contract.
+func TestConfBatchGetResponseCap(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "CapT")
+		const payloadLen = 170000 // per-item W1 size: 8 + 170000 = 170,008
+		seedCapItems(t, c, ctx, "CapT", 100, payloadLen)
+
+		out, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"CapT": {Keys: capKeys(100)},
+		}})
+		if err != nil {
+			t.Fatalf("BatchGetItem: %v", err)
+		}
+		wantReturned := 16 * 1024 * 1024 / (8 + payloadLen) // 98
+		if got := len(out.Responses["CapT"]); got != wantReturned {
+			t.Errorf("len(Responses[CapT]) = %d, want %d", got, wantReturned)
+		}
+		if got := len(out.UnprocessedKeys["CapT"].Keys); got != 100-wantReturned {
+			t.Errorf("len(UnprocessedKeys[CapT].Keys) = %d, want %d", got, 100-wantReturned)
+		}
+		if got := len(out.Responses["CapT"]) + len(out.UnprocessedKeys["CapT"].Keys); got != 100 {
+			t.Errorf("returned + unprocessed = %d, want 100", got)
+		}
+	})
+}
+
+// Measurement is PRE-projection (P-batch): projecting to the tiny key
+// attribute changes the response bodies but not which keys spill.
+func TestConfBatchGetResponseCapPreProjection(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "CapP")
+		const payloadLen = 170000
+		seedCapItems(t, c, ctx, "CapP", 100, payloadLen)
+
+		out, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"CapP": {Keys: capKeys(100), ProjectionExpression: aws.String("pk")},
+		}})
+		if err != nil {
+			t.Fatalf("BatchGetItem: %v", err)
+		}
+		wantReturned := 16 * 1024 * 1024 / (8 + payloadLen)
+		if got := len(out.Responses["CapP"]); got != wantReturned {
+			t.Errorf("len(Responses[CapP]) = %d, want %d (pre-projection measurement)", got, wantReturned)
+		}
+		if got := len(out.UnprocessedKeys["CapP"].Keys); got != 100-wantReturned {
+			t.Errorf("len(UnprocessedKeys[CapP].Keys) = %d, want %d", got, 100-wantReturned)
+		}
+		for i, item := range out.Responses["CapP"] {
+			if len(item) != 1 {
+				t.Errorf("returned item[%d] has %d attrs, want 1 (pk only)", i, len(item))
+			}
+		}
+	})
+}
+
+// The budget is whole-response: one accumulator across tables. The per-table
+// split is arbitrary on the reference — assert only the totals, the per-table
+// returned+unprocessed invariant, and the spill echo shape (P-batch).
+func TestConfBatchGetResponseCapCrossTableEcho(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "CapA")
+		mustCreate(t, c, ctx, "CapB")
+		const payloadLen = 300000 // per-item W1 size: 8 + 300000 = 300,008
+		seedCapItems(t, c, ctx, "CapA", 50, payloadLen)
+		seedCapItems(t, c, ctx, "CapB", 50, payloadLen)
+
+		kaA := types.KeysAndAttributes{
+			Keys:                     capKeys(50),
+			ConsistentRead:           aws.Bool(true),
+			ProjectionExpression:     aws.String("#b"),
+			ExpressionAttributeNames: map[string]string{"#b": "big"},
+		}
+		kaB := types.KeysAndAttributes{
+			Keys:                     capKeys(50),
+			ConsistentRead:           aws.Bool(true),
+			ProjectionExpression:     aws.String("#b"),
+			ExpressionAttributeNames: map[string]string{"#b": "big"},
+		}
+		out, err := c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+			"CapA": kaA,
+			"CapB": kaB,
+		}})
+		if err != nil {
+			t.Fatalf("BatchGetItem: %v", err)
+		}
+		wantTotal := 16 * 1024 * 1024 / (8 + payloadLen) // 55
+		gotReturned := len(out.Responses["CapA"]) + len(out.Responses["CapB"])
+		gotSpilled := len(out.UnprocessedKeys["CapA"].Keys) + len(out.UnprocessedKeys["CapB"].Keys)
+		if gotReturned != wantTotal {
+			t.Errorf("total returned = %d, want %d", gotReturned, wantTotal)
+		}
+		if gotSpilled != 100-wantTotal {
+			t.Errorf("total spilled = %d, want %d", gotSpilled, 100-wantTotal)
+		}
+		for _, table := range []string{"CapA", "CapB"} {
+			if got := len(out.Responses[table]) + len(out.UnprocessedKeys[table].Keys); got != 50 {
+				t.Errorf("%s: returned + unprocessed = %d, want 50", table, got)
+			}
+		}
+		// Spilled entries echo the request's ConsistentRead, projection, and
+		// ExpressionAttributeNames (P-batch).
+		for table, sp := range out.UnprocessedKeys {
+			if !aws.ToBool(sp.ConsistentRead) {
+				t.Errorf("%s: spilled ConsistentRead = %v, want true", table, sp.ConsistentRead)
+			}
+			if got := aws.ToString(sp.ProjectionExpression); got != "#b" {
+				t.Errorf("%s: spilled ProjectionExpression = %q, want #b", table, got)
+			}
+			if sp.ExpressionAttributeNames["#b"] != "big" {
+				t.Errorf("%s: spilled ExpressionAttributeNames = %v, want {#b:big}", table, sp.ExpressionAttributeNames)
+			}
+		}
+	})
+}
+
+// =====================================================================
+// M6a — UpdateTable conformance (dual-target)
+// =====================================================================
+
+// waitForGsiActive polls DescribeTable until the named GSI's IndexStatus is
+// ACTIVE, failing the test on a 10s timeout. The adapter is ACTIVE immediately;
+// dynamodb-local activates a small-table GSI in seconds. A timeout is a real
+// failure, never a skip.
+func waitForGsiActive(t *testing.T, c api, ctx context.Context, table, gsi string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		out, err := c.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String(table)})
+		if err != nil {
+			t.Fatalf("waitForGsiActive DescribeTable %q: %v", table, err)
+		}
+		for _, g := range out.Table.GlobalSecondaryIndexes {
+			if aws.ToString(g.IndexName) == gsi && g.IndexStatus == types.IndexStatusActive {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("waitForGsiActive: %q on %q never reached ACTIVE within 10s", gsi, table)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// TestConfUpdateTableGsiAddBackfill: seed items, UpdateTable create GSI, poll
+// until ACTIVE, then Query and assert the backfilled items match (sparse absent).
+func TestConfUpdateTableGsiAddBackfill(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "UpdT") // pk HASH S
+		// Seed: two indexable, one sparse.
+		putConf(t, c, ctx, "UpdT", map[string]types.AttributeValue{
+			"pk": sv("A"), "gp": sv("G1"), "gr": sv("s1"),
+		})
+		putConf(t, c, ctx, "UpdT", map[string]types.AttributeValue{
+			"pk": sv("B"), "gp": sv("G1"), "gr": sv("s2"),
+		})
+		putConf(t, c, ctx, "UpdT", map[string]types.AttributeValue{
+			"pk": sv("D"), // sparse: no gp
+		})
+
+		_, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+			TableName: aws.String("UpdT"),
+			AttributeDefinitions: []types.AttributeDefinition{
+				{AttributeName: aws.String("gp"), AttributeType: types.ScalarAttributeTypeS},
+				{AttributeName: aws.String("gr"), AttributeType: types.ScalarAttributeTypeS},
+			},
+			GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
+				Create: &types.CreateGlobalSecondaryIndexAction{
+					IndexName: aws.String("g1a"),
+					KeySchema: []types.KeySchemaElement{
+						{AttributeName: aws.String("gp"), KeyType: types.KeyTypeHash},
+						{AttributeName: aws.String("gr"), KeyType: types.KeyTypeRange},
+					},
+					Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll},
+				},
+			}},
+		})
+		if err != nil {
+			t.Fatalf("UpdateTable create: %v", err)
+		}
+		waitForGsiActive(t, c, ctx, "UpdT", "g1a")
+
+		q, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("UpdT"),
+			IndexName:                 aws.String("g1a"),
+			KeyConditionExpression:    aws.String("gp = :v"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{":v": &types.AttributeValueMemberS{Value: "G1"}},
+			ScanIndexForward:          aws.Bool(true),
+		})
+		if err != nil {
+			t.Fatalf("Query new GSI: %v", err)
+		}
+		if len(q.Items) != 2 {
+			t.Fatalf("backfill query returned %d items, want 2", len(q.Items))
+		}
+		got := []string{
+			q.Items[0]["pk"].(*types.AttributeValueMemberS).Value,
+			q.Items[1]["pk"].(*types.AttributeValueMemberS).Value,
+		}
+		want := []string{"A", "B"}
+		for i, w := range want {
+			if got[i] != w {
+				t.Errorf("item[%d].pk = %q, want %q", i, got[i], w)
+			}
+		}
+	})
+}
+
+// TestConfUpdateTableGsiDelete: create a GSI, delete it, assert DescribeTable
+// omits it and Query with that IndexName fails.
+func TestConfUpdateTableGsiDelete(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "UpdT")
+		// Create then immediately delete the GSI.
+		if _, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+			TableName: aws.String("UpdT"),
+			AttributeDefinitions: []types.AttributeDefinition{
+				{AttributeName: aws.String("gp"), AttributeType: types.ScalarAttributeTypeS},
+			},
+			GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
+				Create: &types.CreateGlobalSecondaryIndexAction{
+					IndexName:  aws.String("g1a"),
+					KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("gp"), KeyType: types.KeyTypeHash}},
+					Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll},
+				},
+			}},
+		}); err != nil {
+			t.Fatalf("UpdateTable create: %v", err)
+		}
+		// dynamodb-local creates the GSI asynchronously; wait until ACTIVE
+		// before deleting, or the delete races the CREATING window.
+		waitForGsiActive(t, c, ctx, "UpdT", "g1a")
+		if _, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+			TableName: aws.String("UpdT"),
+			GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
+				Delete: &types.DeleteGlobalSecondaryIndexAction{IndexName: aws.String("g1a")},
+			}},
+		}); err != nil {
+			t.Fatalf("UpdateTable delete: %v", err)
+		}
+		// dynamodb-local may have a brief DELETING window; poll until gone.
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			out, err := c.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("UpdT")})
+			if err != nil {
+				t.Fatalf("delete-poll DescribeTable: %v", err)
+			}
+			gone := true
+			for _, g := range out.Table.GlobalSecondaryIndexes {
+				if aws.ToString(g.IndexName) == "g1a" {
+					gone = false
+				}
+			}
+			if gone || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		desc, err := c.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("UpdT")})
+		if err != nil {
+			t.Fatalf("final DescribeTable: %v", err)
+		}
+		for _, g := range desc.Table.GlobalSecondaryIndexes {
+			if aws.ToString(g.IndexName) == "g1a" {
+				t.Errorf("GSI g1a still present after delete")
+			}
+		}
+		_, qerr := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("UpdT"),
+			IndexName:                 aws.String("g1a"),
+			KeyConditionExpression:    aws.String("gp = :v"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{":v": &types.AttributeValueMemberS{Value: "x"}},
+		})
+		if qerr == nil {
+			t.Error("Query on deleted GSI should fail")
+		}
+	})
+}
+
+// TestConfUpdateTableIgnoredNoOp: BillingMode + ProvisionedThroughput with no
+// GSI updates is accepted-and-ignored; DescribeTable reflects no change.
+func TestConfUpdateTableIgnoredNoOp(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "UpdT")
+		if _, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+			TableName:             aws.String("UpdT"),
+			BillingMode:           types.BillingModePayPerRequest,
+			ProvisionedThroughput: &types.ProvisionedThroughput{ReadCapacityUnits: aws.Int64(5), WriteCapacityUnits: aws.Int64(5)},
+		}); err != nil {
+			t.Fatalf("throughput-only UpdateTable: %v", err)
+		}
+		desc, err := c.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("UpdT")})
+		if err != nil {
+			t.Fatalf("DescribeTable: %v", err)
+		}
+		if len(desc.Table.GlobalSecondaryIndexes) != 0 {
+			t.Errorf("no-op added GSIs: %v", desc.Table.GlobalSecondaryIndexes)
+		}
+	})
+}
+
+func TestConfUpdateTableEmptyUpdates(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "UpdT")
+		_, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{TableName: aws.String("UpdT")})
+		asValidation(t, err, "empty UpdateTable")
+	})
+}
+
+func TestConfUpdateTableUnknownTable(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		_, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+			TableName: aws.String("missing"),
+			GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
+				Delete: &types.DeleteGlobalSecondaryIndexAction{IndexName: aws.String("g1")},
+			}},
+		})
+		asResourceNotFound(t, err, "UpdateTable unknown table")
+	})
+}
+
+// W8 #8: UpdateTable Create naming an existing index AND carrying an invalid
+// key schema surfaces the existing-index error, not the schema error (P-misc
+// probe: the existing-index check beats schema validation). Both targets
+// return an existing-index error; asserted by message since dynamodb-local
+// returns ValidationException where the adapter returns ResourceInUseException.
+func TestConfUpdateTableCreateExistingPrecedence(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		_, err := c.CreateTable(ctx, &dynamodb.CreateTableInput{
+			TableName: aws.String("UtPrec"),
+			KeySchema: []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+			AttributeDefinitions: []types.AttributeDefinition{
+				{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+				{AttributeName: aws.String("gk"), AttributeType: types.ScalarAttributeTypeS},
+			},
+			GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{{
+				IndexName:  aws.String("gsi1"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("gk"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeKeysOnly},
+			}},
+			BillingMode: types.BillingModePayPerRequest,
+		})
+		if err != nil {
+			t.Fatalf("CreateTable: %v", err)
+		}
+
+		// Same index name + invalid key schema (same attribute as HASH and RANGE).
+		_, err = c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+			TableName: aws.String("UtPrec"),
+			GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
+				Create: &types.CreateGlobalSecondaryIndexAction{
+					IndexName: aws.String("gsi1"),
+					KeySchema: []types.KeySchemaElement{
+						{AttributeName: aws.String("gk"), KeyType: types.KeyTypeHash},
+						{AttributeName: aws.String("gk"), KeyType: types.KeyTypeRange},
+					},
+					Projection: &types.Projection{ProjectionType: types.ProjectionTypeKeysOnly},
+				},
+			}},
+		})
+		if err == nil {
+			t.Fatal("UpdateTable: expected existing-index error, got nil")
+		}
+		if !strings.Contains(err.Error(), "already exists") {
+			t.Errorf("UpdateTable err = %v, want existing-index error (message contains \"already exists\")", err)
+		}
+	})
+}
+
+// The following cases assert restrictive behaviors (spec §8 tie-break): the
+// engine follows documented AWS where dynamodb-local may be more permissive, so
+// they run against the adapter only. Task 12 probes dynamodb-local and may
+// upgrade a case to runConformance if the reference target agrees.
+
+func TestAdapterUpdateTableAddExisting(t *testing.T) {
+	ctx := context.Background()
+	c, cleanup := newAdapterTarget(t)
+	defer cleanup()
+	mustCreate(t, c, ctx, "UpdT")
+	// Create g1x once.
+	c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+		TableName: aws.String("UpdT"),
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("gp"), AttributeType: types.ScalarAttributeTypeS},
+		},
+		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
+			Create: &types.CreateGlobalSecondaryIndexAction{
+				IndexName:  aws.String("g1x"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("gp"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll},
+			},
+		}},
+	})
+	// Create g1x again -> ResourceInUseException (probe P2 default).
+	_, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+		TableName: aws.String("UpdT"),
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("gp"), AttributeType: types.ScalarAttributeTypeS},
+		},
+		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
+			Create: &types.CreateGlobalSecondaryIndexAction{
+				IndexName:  aws.String("g1x"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("gp"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll},
+			},
+		}},
+	})
+	asResourceInUse(t, err, "add existing GSI")
+}
+
+func TestAdapterUpdateTableDeleteUnknown(t *testing.T) {
+	ctx := context.Background()
+	c, cleanup := newAdapterTarget(t)
+	defer cleanup()
+	mustCreate(t, c, ctx, "UpdT")
+	_, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+		TableName: aws.String("UpdT"),
+		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
+			Delete: &types.DeleteGlobalSecondaryIndexAction{IndexName: aws.String("nope")},
+		}},
+	})
+	asResourceNotFound(t, err, "delete unknown GSI")
+}
+
+func TestAdapterUpdateTable21stGsi(t *testing.T) {
+	ctx := context.Background()
+	c, cleanup := newAdapterTarget(t)
+	defer cleanup()
+	mustCreate(t, c, ctx, "UpdT")
+	// Create 20 GSIs (probe P3 default: cap enforced; adapter-only until probed).
+	for i := 0; i < 20; i++ {
+		name := fmt.Sprintf("g%02d", i)
+		if _, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+			TableName: aws.String("UpdT"),
+			AttributeDefinitions: []types.AttributeDefinition{
+				{AttributeName: aws.String(name), AttributeType: types.ScalarAttributeTypeS},
+			},
+			GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
+				Create: &types.CreateGlobalSecondaryIndexAction{
+					IndexName:  aws.String(name),
+					KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String(name), KeyType: types.KeyTypeHash}},
+					Projection: &types.Projection{ProjectionType: types.ProjectionTypeKeysOnly},
+				},
+			}},
+		}); err != nil {
+			t.Fatalf("create GSI %d: %v", i, err)
+		}
+	}
+	_, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+		TableName: aws.String("UpdT"),
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("gp21"), AttributeType: types.ScalarAttributeTypeS},
+		},
+		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
+			Create: &types.CreateGlobalSecondaryIndexAction{
+				IndexName:  aws.String("g21"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("gp21"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeKeysOnly},
+			},
+		}},
+	})
+	asLimitExceeded(t, err, "21st GSI")
+}
+
+func TestAdapterUpdateTableTwoActions(t *testing.T) {
+	ctx := context.Background()
+	c, cleanup := newAdapterTarget(t)
+	defer cleanup()
+	mustCreate(t, c, ctx, "UpdT")
+	_, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+		TableName: aws.String("UpdT"),
+		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{
+			{Delete: &types.DeleteGlobalSecondaryIndexAction{IndexName: aws.String("a")}},
+			{Delete: &types.DeleteGlobalSecondaryIndexAction{IndexName: aws.String("b")}},
+		},
+	})
+	asValidation(t, err, "two GSI actions")
+}
+
+func TestAdapterUpdateTableGsiPlusBillingMode(t *testing.T) {
+	ctx := context.Background()
+	c, cleanup := newAdapterTarget(t)
+	defer cleanup()
+	mustCreate(t, c, ctx, "UpdT")
+	_, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+		TableName:   aws.String("UpdT"),
+		BillingMode: types.BillingModePayPerRequest,
+		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
+			Create: &types.CreateGlobalSecondaryIndexAction{
+				IndexName:  aws.String("g1x"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("gp"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll},
+			},
+		}},
+	})
+	asValidation(t, err, "GSI action + BillingMode")
+}
+
+func TestAdapterUpdateTableThroughputUpdateCombos(t *testing.T) {
+	ctx := context.Background()
+	c, cleanup := newAdapterTarget(t)
+	defer cleanup()
+	mustCreate(t, c, ctx, "UpdT")
+	// Two Update actions.
+	_, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+		TableName: aws.String("UpdT"),
+		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{
+			{Update: &types.UpdateGlobalSecondaryIndexAction{IndexName: aws.String("g1")}},
+			{Update: &types.UpdateGlobalSecondaryIndexAction{IndexName: aws.String("g2")}},
+		},
+	})
+	asValidation(t, err, "two Update actions")
+	// Update + Create.
+	_, err = c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+		TableName: aws.String("UpdT"),
+		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{
+			{Update: &types.UpdateGlobalSecondaryIndexAction{IndexName: aws.String("g1")}},
+			{Create: &types.CreateGlobalSecondaryIndexAction{IndexName: aws.String("g2")}},
+		},
+	})
+	asValidation(t, err, "Update + Create")
+	// Update + BillingMode.
+	_, err = c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+		TableName:   aws.String("UpdT"),
+		BillingMode: types.BillingModePayPerRequest,
+		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
+			Update: &types.UpdateGlobalSecondaryIndexAction{IndexName: aws.String("g1")},
+		}},
+	})
+	asValidation(t, err, "Update + BillingMode")
+}
+
+func TestAdapterUpdateTableStrayAttributeDefinitions(t *testing.T) {
+	ctx := context.Background()
+	c, cleanup := newAdapterTarget(t)
+	defer cleanup()
+	mustCreate(t, c, ctx, "UpdT")
+	// With a Delete action.
+	_, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+		TableName: aws.String("UpdT"),
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("gp"), AttributeType: types.ScalarAttributeTypeS},
+		},
+		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
+			Delete: &types.DeleteGlobalSecondaryIndexAction{IndexName: aws.String("g1")},
+		}},
+	})
+	asValidation(t, err, "stray AttributeDefinitions with Delete")
+	// With no GSI action (ignored-fields only).
+	_, err = c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
+		TableName:   aws.String("UpdT"),
+		BillingMode: types.BillingModePayPerRequest,
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("gp"), AttributeType: types.ScalarAttributeTypeS},
+		},
+	})
+	asValidation(t, err, "stray AttributeDefinitions with no GSI action")
+}
+
+// --- M6B: projection helpers ---
+
+// projConfSeed puts one rich item (pk P1, scalars + nested map + list) for
+// projection conformance cases.
+func projConfSeed(t *testing.T, c api, ctx context.Context, table string) {
+	t.Helper()
+	putConf(t, c, ctx, table, map[string]types.AttributeValue{
+		"pk":  strVal("P1"),
+		"top": strVal("topval"),
+		"num": numVal("42"),
+		"obj": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{
+			"a": strVal("aval"),
+			"b": strVal("bval"),
+			"nested": &types.AttributeValueMemberM{Value: map[string]types.AttributeValue{
+				"x": strVal("xval"),
+				"y": strVal("yval"),
+			}},
+		}},
+		"arr": &types.AttributeValueMemberL{Value: []types.AttributeValue{
+			strVal("e0"), strVal("e1"), strVal("e2"),
+		}},
+	})
+}
+
+// wantAttrs asserts the item has exactly the given attribute names (sorted).
+func wantAttrs(t *testing.T, item map[string]types.AttributeValue, want ...string) {
+	t.Helper()
+	got := itemAttrNamesConf(item)
+	if len(got) != len(want) {
+		t.Fatalf("attrs = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Fatalf("attrs = %v, want %v", got, want)
+		}
+	}
+}
+
+// projGetConf is GetItem with a projection, failing on error.
+func projGetConf(t *testing.T, c api, ctx context.Context, table, projExpr string, names map[string]string) map[string]types.AttributeValue {
+	t.Helper()
+	in := &dynamodb.GetItemInput{
+		TableName: aws.String(table),
+		Key:       map[string]types.AttributeValue{"pk": strVal("P1")},
+	}
+	if projExpr != "" {
+		in.ProjectionExpression = aws.String(projExpr)
+	}
+	if names != nil {
+		in.ExpressionAttributeNames = names
+	}
+	out, err := c.GetItem(ctx, in)
+	if err != nil {
+		t.Fatalf("GetItem proj=%q: %v", projExpr, err)
+	}
+	return out.Item
+}
+
+// --- M6B: GetItem projection semantics (spec §6.1) ---
+
+func TestConfProjGetSingle(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		projConfSeed(t, c, ctx, "ProjT")
+		item := projGetConf(t, c, ctx, "ProjT", "top", nil)
+		wantAttrs(t, item, "top") // keys are NOT auto-returned (spec §2.1.1)
+	})
+}
+
+func TestConfProjGetMultiple(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		projConfSeed(t, c, ctx, "ProjT")
+		item := projGetConf(t, c, ctx, "ProjT", "top, num", nil)
+		wantAttrs(t, item, "num", "top")
+	})
+}
+
+func TestConfProjGetMissing(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		projConfSeed(t, c, ctx, "ProjT")
+		item := projGetConf(t, c, ctx, "ProjT", "nonexistent, top", nil)
+		wantAttrs(t, item, "top") // missing path omitted, no error
+	})
+}
+
+func TestConfProjGetNestedSpine(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		projConfSeed(t, c, ctx, "ProjT")
+		item := projGetConf(t, c, ctx, "ProjT", "obj.nested.x", nil)
+		wantAttrs(t, item, "obj")
+		obj := item["obj"].(*types.AttributeValueMemberM).Value
+		wantAttrs(t, obj, "nested")
+		nested := obj["nested"].(*types.AttributeValueMemberM).Value
+		wantAttrs(t, nested, "x")
+		if nested["x"].(*types.AttributeValueMemberS).Value != "xval" {
+			t.Errorf("obj.nested.x = %v, want xval", nested["x"])
+		}
+	})
+}
+
+func TestConfProjGetSiblingNested(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		projConfSeed(t, c, ctx, "ProjT")
+		item := projGetConf(t, c, ctx, "ProjT", "obj.a, obj.b", nil)
+		wantAttrs(t, item, "obj")
+		obj := item["obj"].(*types.AttributeValueMemberM).Value
+		wantAttrs(t, obj, "a", "b")
+	})
+}
+
+func TestConfProjGetListElement(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		projConfSeed(t, c, ctx, "ProjT")
+		item := projGetConf(t, c, ctx, "ProjT", "arr[1]", nil)
+		wantAttrs(t, item, "arr")
+		arr := item["arr"].(*types.AttributeValueMemberL).Value
+		if len(arr) != 1 || arr[0].(*types.AttributeValueMemberS).Value != "e1" {
+			t.Errorf("arr = %v, want single-element [e1] (compacted)", arr)
+		}
+	})
+}
+
+func TestConfProjGetNameSubstitution(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		projConfSeed(t, c, ctx, "ProjT")
+		item := projGetConf(t, c, ctx, "ProjT", "#t, #o.#a", map[string]string{"#t": "top", "#o": "obj", "#a": "a"})
+		wantAttrs(t, item, "obj", "top")
+		obj := item["obj"].(*types.AttributeValueMemberM).Value
+		wantAttrs(t, obj, "a")
+	})
+}
+
+func TestConfProjGetReservedWord(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		putConf(t, c, ctx, "ProjT", map[string]types.AttributeValue{"pk": strVal("P1"), "name": strVal("reserved")})
+
+		// Bare reserved word -> ValidationException.
+		_, err := c.GetItem(ctx, &dynamodb.GetItemInput{
+			TableName:            aws.String("ProjT"),
+			Key:                  map[string]types.AttributeValue{"pk": strVal("P1")},
+			ProjectionExpression: aws.String("name"),
+		})
+		asValidation(t, err, "bare reserved word in projection")
+
+		// Via #name alias -> accepted.
+		item := projGetConf(t, c, ctx, "ProjT", "#n", map[string]string{"#n": "name"})
+		wantAttrs(t, item, "name")
+	})
+}
+
+func TestConfProjGetEmptyExpression(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		projConfSeed(t, c, ctx, "ProjT")
+		_, err := c.GetItem(ctx, &dynamodb.GetItemInput{
+			TableName:            aws.String("ProjT"),
+			Key:                  map[string]types.AttributeValue{"pk": strVal("P1")},
+			ProjectionExpression: aws.String(""),
+		})
+		asValidation(t, err, "empty ProjectionExpression")
+	})
+}
+
+func TestConfProjGetPlusAttributesToGet(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		projConfSeed(t, c, ctx, "ProjT")
+		_, err := c.GetItem(ctx, &dynamodb.GetItemInput{
+			TableName:            aws.String("ProjT"),
+			Key:                  map[string]types.AttributeValue{"pk": strVal("P1")},
+			ProjectionExpression: aws.String("top"),
+			AttributesToGet:      []string{"num"},
+		})
+		asValidation(t, err, "ProjectionExpression + AttributesToGet")
+	})
+}
+
+// --- M6B: overlap rejection (spec §6.2) ---
+
+func TestConfProjOverlapDuplicate(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		projConfSeed(t, c, ctx, "ProjT")
+		_, err := c.GetItem(ctx, &dynamodb.GetItemInput{
+			TableName:            aws.String("ProjT"),
+			Key:                  map[string]types.AttributeValue{"pk": strVal("P1")},
+			ProjectionExpression: aws.String("top, top"),
+		})
+		asValidation(t, err, "duplicate projection path")
+	})
+}
+
+func TestConfProjOverlapParentChild(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		projConfSeed(t, c, ctx, "ProjT")
+		_, err := c.GetItem(ctx, &dynamodb.GetItemInput{
+			TableName:            aws.String("ProjT"),
+			Key:                  map[string]types.AttributeValue{"pk": strVal("P1")},
+			ProjectionExpression: aws.String("obj, obj.a"),
+		})
+		asValidation(t, err, "parent+child projection paths")
+	})
+}
+
+// --- M6B: Query/Scan projection (spec §6.3) ---
+
+func TestConfProjQuery(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 5) // sk 0..4, flag yes/no
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ProjectionExpression:      aws.String("flag"),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if out.Count != 5 || out.ScannedCount != 5 {
+			t.Errorf("Count=%d ScannedCount=%d, want 5/5 (projection does not change counts)", out.Count, out.ScannedCount)
+		}
+		for i, item := range out.Items {
+			wantAttrs(t, item, "flag")
+			want := "no"
+			if i%2 == 0 {
+				want = "yes"
+			}
+			if v := item["flag"].(*types.AttributeValueMemberS).Value; v != want {
+				t.Errorf("item[%d].flag = %q, want %q", i, v, want)
+			}
+		}
+	})
+}
+
+func TestConfProjQueryAfterFilter(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 2) // sk 0 (flag yes), sk 1 (flag no)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		filterExpr := expression.Name("flag").Equal(expression.Value("yes"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr).WithFilter(filterExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			FilterExpression:          expr.Filter(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ProjectionExpression:      aws.String("flag"),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if out.Count != 1 || out.ScannedCount != 2 {
+			t.Errorf("Count=%d ScannedCount=%d, want 1/2 (projection after filter)", out.Count, out.ScannedCount)
+		}
+		if len(out.Items) != 1 {
+			t.Fatalf("Items = %d, want 1", len(out.Items))
+		}
+		wantAttrs(t, out.Items[0], "flag")
+	})
+}
+
+func TestConfProjScan(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 3)
+
+		out, err := c.Scan(ctx, &dynamodb.ScanInput{
+			TableName:            aws.String("ConfT"),
+			ProjectionExpression: aws.String("flag"),
+		})
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if out.Count != 3 {
+			t.Fatalf("Count = %d, want 3", out.Count)
+		}
+		for _, item := range out.Items {
+			wantAttrs(t, item, "flag")
+		}
+	})
+}
+
+func TestConfProjQuerySelectCountRejected(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 3)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Select:                    types.SelectCount,
+			ProjectionExpression:      aws.String("flag"),
+		})
+		asValidation(t, err, "Select=COUNT + ProjectionExpression")
+	})
+}
+
+func TestConfProjQuerySelectSpecificAttributes(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 3)
+
+		keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfT"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Select:                    types.SelectSpecificAttributes,
+			ProjectionExpression:      aws.String("flag"),
+		})
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if out.Count != 3 {
+			t.Fatalf("Count = %d, want 3", out.Count)
+		}
+		for _, item := range out.Items {
+			wantAttrs(t, item, "flag")
+		}
+	})
+}
+
+// --- M6B: GSI projection restriction (spec §6.5) ---
+
+func TestConfProjGsiKeysOnlyRestricted(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfGsiT")
+		seedGsiConformance(t, c, ctx, "ConfGsiT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+
+		// Projecting a non-projected attr -> ValidationException.
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfGsiT"),
+			IndexName:                 aws.String("gsi-keys"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ProjectionExpression:      aws.String("extra"),
+		})
+		asValidation(t, err, "KEYS_ONLY GSI project non-projected attr")
+
+		// Projecting table key attrs -> accepted.
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfGsiT"),
+			IndexName:                 aws.String("gsi-keys"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ProjectionExpression:      aws.String("pk, sk"),
+		})
+		if err != nil {
+			t.Fatalf("KEYS_ONLY GSI project keys: %v", err)
+		}
+		if len(out.Items) != 3 {
+			t.Fatalf("Items = %d, want 3 (G1 partition)", len(out.Items))
+		}
+		for _, item := range out.Items {
+			wantAttrs(t, item, "pk", "sk")
+		}
+	})
+}
+
+func TestConfProjGsiInclude(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfGsiT")
+		seedGsiConformance(t, c, ctx, "ConfGsiT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+
+		// Included attr -> accepted. G1 partition has three items (A, B, C);
+		// item C has NO proj1, so projecting proj1 on it yields an EMPTY item {}.
+		out, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfGsiT"),
+			IndexName:                 aws.String("gsi-incl"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ProjectionExpression:      aws.String("proj1"),
+		})
+		if err != nil {
+			t.Fatalf("INCLUDE GSI project proj1: %v", err)
+		}
+		if len(out.Items) != 3 {
+			t.Fatalf("Items = %d, want 3 (G1 partition, includes C with no proj1)", len(out.Items))
+		}
+		for _, item := range out.Items {
+			if len(item) == 0 {
+				continue // item C projects proj1 -> empty map
+			}
+			wantAttrs(t, item, "proj1")
+		}
+
+		// Non-included attr -> ValidationException.
+		_, err = c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfGsiT"),
+			IndexName:                 aws.String("gsi-incl"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			ProjectionExpression:      aws.String("extra"),
+		})
+		asValidation(t, err, "INCLUDE GSI project non-included attr")
+	})
+}
+
+func TestConfProjGsiSelectAllProjectedPlusProjection(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfGsiT")
+		seedGsiConformance(t, c, ctx, "ConfGsiT")
+
+		keyExpr := expression.Key("gsi_pk").Equal(expression.Value("G1"))
+		expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
+		_, err := c.Query(ctx, &dynamodb.QueryInput{
+			TableName:                 aws.String("ConfGsiT"),
+			IndexName:                 aws.String("gsi-incl"),
+			KeyConditionExpression:    expr.KeyCondition(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+			Select:                    types.SelectAllProjectedAttributes,
+			ProjectionExpression:      aws.String("proj1"),
+		})
+		asValidation(t, err, "ALL_PROJECTED_ATTRIBUTES + ProjectionExpression on GSI")
+	})
+}
+
+func TestConfProjGsiScanRestricted(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "ConfGsiT")
+		seedGsiConformance(t, c, ctx, "ConfGsiT")
+
+		_, err := c.Scan(ctx, &dynamodb.ScanInput{
+			TableName:            aws.String("ConfGsiT"),
+			IndexName:            aws.String("gsi-keys"),
+			ProjectionExpression: aws.String("extra"),
+		})
+		asValidation(t, err, "KEYS_ONLY GSI Scan project non-projected attr")
+	})
+}
+
+// --- M6B: projection edge cases (spec §6.6) ---
+
+func TestConfProjDescendIntoScalar(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		projConfSeed(t, c, ctx, "ProjT")
+		item := projGetConf(t, c, ctx, "ProjT", "top.nested", nil)
+		if len(item) != 0 {
+			t.Errorf("attrs = %v, want none (path into a String does not resolve)", itemAttrNamesConf(item))
+		}
+	})
+}
+
+func TestConfProjListMultiIndex(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		projConfSeed(t, c, ctx, "ProjT")
+
+		get := func(expr string) []string {
+			item := projGetConf(t, c, ctx, "ProjT", expr, nil)
+			arr := item["arr"].(*types.AttributeValueMemberL).Value
+			got := make([]string, 0, len(arr))
+			for _, e := range arr {
+				got = append(got, e.(*types.AttributeValueMemberS).Value)
+			}
+			return got
+		}
+		// Both path orders yield the two elements, compacted; order per the
+		// §2.5 probe (source-index order: arr[2], arr[0] -> [e0, e2]).
+		if got := get("arr[0], arr[2]"); len(got) != 2 || got[0] != "e0" || got[1] != "e2" {
+			t.Errorf("arr[0], arr[2] = %v, want [e0 e2]", got)
+		}
+		if got := get("arr[2], arr[0]"); len(got) != 2 || got[0] != "e0" || got[1] != "e2" {
+			t.Errorf("arr[2], arr[0] = %v, want [e0 e2] (source-index order)", got)
+		}
+	})
+}
+
+func TestConfProjListConvergent(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "ProjT")
+		putConf(t, c, ctx, "ProjT", map[string]types.AttributeValue{
+			"pk": strVal("P1"),
+			"marr": &types.AttributeValueMemberL{Value: []types.AttributeValue{
+				&types.AttributeValueMemberM{Value: map[string]types.AttributeValue{"x": strVal("x0"), "y": strVal("y0")}},
+				&types.AttributeValueMemberM{Value: map[string]types.AttributeValue{"x": strVal("x1"), "y": strVal("y1")}},
+			}},
+		})
+
+		item := projGetConf(t, c, ctx, "ProjT", "marr[1].x, marr[1].y", nil)
+		arr := item["marr"].(*types.AttributeValueMemberL).Value
+		if len(arr) != 1 {
+			t.Fatalf("marr = %v, want one merged element", arr)
+		}
+		elem := arr[0].(*types.AttributeValueMemberM).Value
+		wantAttrs(t, elem, "x", "y")
+		if elem["x"].(*types.AttributeValueMemberS).Value != "x1" || elem["y"].(*types.AttributeValueMemberS).Value != "y1" {
+			t.Errorf("elem = %v, want {x:x1, y:y1}", elem)
+		}
+	})
+}
+
+// =====================================================================
+// M6C W2 — expression-limit conformance (dual-target)
+// =====================================================================
+
+// TestConfExprStringLimit pins the 4KB expression-string byte-length limit.
+// The ConditionExpression is 4097 bytes (4092 'a's plus " = :v"), which
+// dynamodb-local 3.3.1 rejects with ValidationException "Expression size has
+// exceeded the maximum allowed size"; the engine rejects the same input via
+// its maxExprString check.
+func TestConfExprStringLimit(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "Expr")
+
+		longAttr := strings.Repeat("a", 4092)
+		_, err := c.PutItem(ctx, &dynamodb.PutItemInput{
+			TableName:                 aws.String("Expr"),
+			Item:                      map[string]types.AttributeValue{"pk": strVal("k")},
+			ConditionExpression:       aws.String(longAttr + " = :v"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{":v": strVal("x")},
+		})
+		asValidation(t, err, "Expression size")
+	})
+}
+
+// TestConfOperatorCountLimit pins the 300-operator cap. 151 "a=a" comparisons
+// joined by 150 " OR " yield 301 operators total, rejected.
+func TestConfOperatorCountLimit(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "Expr")
+
+		ops := make([]string, 151)
+		for i := range ops {
+			ops[i] = "a=a"
+		}
+		_, err := c.PutItem(ctx, &dynamodb.PutItemInput{
+			TableName:           aws.String("Expr"),
+			Item:                map[string]types.AttributeValue{"pk": strVal("k")},
+			ConditionExpression: aws.String(strings.Join(ops, " OR ")),
+		})
+		asValidation(t, err, "operator count")
+	})
+}
+
+// TestConfInOperandLimit pins the 100-operand IN cap: 101 operands rejected.
+func TestConfInOperandLimit(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "Expr")
+
+		ops := make([]string, 101)
+		for i := range ops {
+			ops[i] = ":v"
+		}
+		_, err := c.PutItem(ctx, &dynamodb.PutItemInput{
+			TableName:                 aws.String("Expr"),
+			Item:                      map[string]types.AttributeValue{"pk": strVal("k")},
+			ConditionExpression:       aws.String("a IN (" + strings.Join(ops, ",") + ")"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{":v": strVal("x")},
+		})
+		asValidation(t, err, "number of operands")
+	})
+}
+
+// TestConfPathDepthLimit pins the 32-segment path cap: a 33-segment path in
+// attribute_exists is rejected during binder.path resolution.
+func TestConfPathDepthLimit(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "Expr")
+
+		segs := make([]string, 33)
+		for i := range segs {
+			segs[i] = "a"
+		}
+		_, err := c.PutItem(ctx, &dynamodb.PutItemInput{
+			TableName:           aws.String("Expr"),
+			Item:                map[string]types.AttributeValue{"pk": strVal("k")},
+			ConditionExpression: aws.String("attribute_exists(" + strings.Join(segs, ".") + ")"),
+		})
+		asValidation(t, err, "nesting levels")
+	})
+}
+
+// TestConfNameTokenLimit pins the 255-byte ExpressionAttributeNames KEY limit.
+// The #name token ("#" + 255 'a's = 256 bytes) is rejected.
+func TestConfNameTokenLimit(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "Expr")
+
+		longName := "#" + strings.Repeat("a", 255)
+		_, err := c.PutItem(ctx, &dynamodb.PutItemInput{
+			TableName:                 aws.String("Expr"),
+			Item:                      map[string]types.AttributeValue{"pk": strVal("k")},
+			ConditionExpression:       aws.String(longName + " = :v"),
+			ExpressionAttributeNames:  map[string]string{longName: "attr"},
+			ExpressionAttributeValues: map[string]types.AttributeValue{":v": strVal("x")},
+		})
+		asValidation(t, err, "key too long")
+	})
+}
+
+// TestConfSubstitutionValueLimit pins the ~1MB serialized
+// ExpressionAttributeValues cap: a 2MB string value is rejected.
+func TestConfSubstitutionValueLimit(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "Expr")
+
+		_, err := c.PutItem(ctx, &dynamodb.PutItemInput{
+			TableName:                 aws.String("Expr"),
+			Item:                      map[string]types.AttributeValue{"pk": strVal("k")},
+			ConditionExpression:       aws.String("a = :v"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{":v": strVal(strings.Repeat("x", 2<<20))},
+		})
+		asValidation(t, err, "Expression size")
+	})
+}
+
+// TestConfEmptyTableNameRejected pins P-names: every table-taking operation
+// rejects an empty TableName with ValidationException.
+func TestConfEmptyTableNameRejected(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		empty := aws.String("")
+		ks := []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}}
+		ads := []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}}
+		key := map[string]types.AttributeValue{"pk": strVal("k")}
+
+		check := func(op string, err error) {
+			t.Helper()
+			asValidation(t, err, op)
+		}
+
+		_, err := c.CreateTable(ctx, &dynamodb.CreateTableInput{TableName: empty, KeySchema: ks, AttributeDefinitions: ads, BillingMode: types.BillingModePayPerRequest})
+		check("CreateTable", err)
+		_, err = c.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: empty})
+		check("DescribeTable", err)
+		_, err = c.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: empty})
+		check("DeleteTable", err)
+		_, err = c.PutItem(ctx, &dynamodb.PutItemInput{TableName: empty, Item: key})
+		check("PutItem", err)
+		_, err = c.GetItem(ctx, &dynamodb.GetItemInput{TableName: empty, Key: key})
+		check("GetItem", err)
+		_, err = c.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: empty, Key: key})
+		check("DeleteItem", err)
+		_, err = c.UpdateItem(ctx, &dynamodb.UpdateItemInput{TableName: empty, Key: key, UpdateExpression: aws.String("SET #v = :v"), ExpressionAttributeNames: map[string]string{"#v": "v"}, ExpressionAttributeValues: map[string]types.AttributeValue{":v": strVal("x")}})
+		check("UpdateItem", err)
+		_, err = c.Query(ctx, &dynamodb.QueryInput{TableName: empty, KeyConditionExpression: aws.String("pk = :pk"), ExpressionAttributeValues: map[string]types.AttributeValue{":pk": strVal("k")}})
+		check("Query", err)
+		_, err = c.Scan(ctx, &dynamodb.ScanInput{TableName: empty})
+		check("Scan", err)
+		_, err = c.UpdateTable(ctx, &dynamodb.UpdateTableInput{TableName: empty, BillingMode: types.BillingModeProvisioned, ProvisionedThroughput: &types.ProvisionedThroughput{ReadCapacityUnits: aws.Int64(1), WriteCapacityUnits: aws.Int64(1)}})
+		check("UpdateTable", err)
+		_, err = c.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{TableName: empty, TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(true), AttributeName: aws.String("ttl")}})
+		check("UpdateTimeToLive", err)
+		_, err = c.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: empty})
+		check("DescribeTimeToLive", err)
+		_, err = c.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{"": {batchPut(key)}}})
+		check("BatchWriteItem", err)
+		_, err = c.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{"": {Keys: []map[string]types.AttributeValue{key}}}})
+		check("BatchGetItem", err)
+	})
+}
+
+// mustCreateCompositeS creates a table with pk HASH S, sk RANGE S.
+func mustCreateCompositeS(t *testing.T, c api, ctx context.Context, name string) {
+	t.Helper()
+	_, err := c.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName: aws.String(name),
+		KeySchema: []types.KeySchemaElement{
+			{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash},
+			{AttributeName: aws.String("sk"), KeyType: types.KeyTypeRange},
+		},
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("sk"), AttributeType: types.ScalarAttributeTypeS},
+		},
+		BillingMode: types.BillingModePayPerRequest,
+	})
+	if err != nil {
+		t.Fatalf("CreateTable %q: %v", name, err)
+	}
+}
+
+// TestConfKeyValueLengthLimits pins P-names: pk ≤2048 / sk ≤1024 bytes,
+// inclusive; empty primary-key values rejected.
+func TestConfKeyValueLengthLimits(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateCompositeS(t, c, ctx, "KvLen")
+
+		put := func(pk, sk string) error {
+			_, err := c.PutItem(ctx, &dynamodb.PutItemInput{
+				TableName: aws.String("KvLen"),
+				Item:      map[string]types.AttributeValue{"pk": strVal(pk), "sk": strVal(sk)},
+			})
+			return err
+		}
+
+		if err := put(strings.Repeat("k", 2048), "s"); err != nil {
+			t.Errorf("pk 2048: %v", err)
+		}
+		asValidation(t, put(strings.Repeat("k", 2049), "s"), "pk 2049")
+		if err := put("k2", strings.Repeat("s", 1024)); err != nil {
+			t.Errorf("sk 1024: %v", err)
+		}
+		asValidation(t, put("k2", strings.Repeat("s", 1025)), "sk 1025")
+		asValidation(t, put("", "s"), "empty pk")
+		asValidation(t, put("k3", ""), "empty sk")
+	})
+}
+
+// TestConfIndexAttrNameLengths pins P-names: GSI key attribute names and
+// INCLUDE NonKeyAttributes names are capped at 255 bytes.
+func TestConfIndexAttrNameLengths(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		name256 := strings.Repeat("g", 256)
+
+		_, err := c.CreateTable(ctx, &dynamodb.CreateTableInput{
+			TableName: aws.String("IdxLen"),
+			KeySchema: []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+			AttributeDefinitions: []types.AttributeDefinition{
+				{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+				{AttributeName: aws.String(name256), AttributeType: types.ScalarAttributeTypeS},
+			},
+			GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{{
+				IndexName:  aws.String("gsi1"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String(name256), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll},
+			}},
+			BillingMode: types.BillingModePayPerRequest,
+		})
+		asValidation(t, err, "gsi key attr 256")
+
+		_, err = c.CreateTable(ctx, &dynamodb.CreateTableInput{
+			TableName:            aws.String("InclLen"),
+			KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+			AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
+			GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{{
+				IndexName:  aws.String("gsi1"),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeInclude, NonKeyAttributes: []string{strings.Repeat("a", 256)}},
+			}},
+			BillingMode: types.BillingModePayPerRequest,
+		})
+		asValidation(t, err, "include attr 256")
+	})
+}
+
+// TestConfCrossIndexProjectionSum pins P-names: user-specified projected
+// attributes across all GSIs sum to ≤100; key attributes do not count.
+func TestConfCrossIndexProjectionSum(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		attrs := func(prefix string, n int) []string {
+			out := make([]string, n)
+			for i := range out {
+				out[i] = fmt.Sprintf("%s%03d", prefix, i)
+			}
+			return out
+		}
+		inclGsi := func(name string, projected []string) types.GlobalSecondaryIndex {
+			return types.GlobalSecondaryIndex{
+				IndexName:  aws.String(name),
+				KeySchema:  []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+				Projection: &types.Projection{ProjectionType: types.ProjectionTypeInclude, NonKeyAttributes: projected},
+			}
+		}
+		base := func(table string, gsis ...types.GlobalSecondaryIndex) *dynamodb.CreateTableInput {
+			return &dynamodb.CreateTableInput{
+				TableName:              aws.String(table),
+				KeySchema:              []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+				AttributeDefinitions:   []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
+				GlobalSecondaryIndexes: gsis,
+				BillingMode:            types.BillingModePayPerRequest,
+			}
+		}
+
+		// 50 + 50 = 100: accepted.
+		if _, err := c.CreateTable(ctx, base("SumOk", inclGsi("sumg1", attrs("a", 50)), inclGsi("sumg2", attrs("b", 50)))); err != nil {
+			t.Errorf("sum 100: %v", err)
+		}
+		// 51 + 50 = 101: rejected.
+		_, err := c.CreateTable(ctx, base("SumOver", inclGsi("sumg1", attrs("a", 51)), inclGsi("sumg2", attrs("b", 50))))
+		asValidation(t, err, "sum 101")
+		// 99 INCLUDE attrs + key attrs: accepted (key attrs do not count).
+		if _, err := c.CreateTable(ctx, base("SumKeys", inclGsi("sumg1", attrs("a", 99)))); err != nil {
+			t.Errorf("sum 99 + keys: %v", err)
+		}
+	})
+}
+
+// =====================================================================
+// M6c W5 — DescribeTable ItemCount/TableSizeBytes reporting (dual-target)
+// =====================================================================
+
+// TestConfDescribeTableStats: DescribeTable reports real, immediate
+// ItemCount/TableSizeBytes after puts, overwrites, and deletes (P-desc: exact
+// W1-accounting sums, immediate — no eventual consistency in dynamodb-local).
+func TestConfDescribeTableStats(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "DescT")
+		// Empty table: 0/0.
+		desc, err := c.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("DescT")})
+		if err != nil {
+			t.Fatalf("DescribeTable empty: %v", err)
+		}
+		if aws.ToInt64(desc.Table.ItemCount) != 0 || aws.ToInt64(desc.Table.TableSizeBytes) != 0 {
+			t.Errorf("empty = (count %d, size %d), want (0, 0)", aws.ToInt64(desc.Table.ItemCount), aws.ToInt64(desc.Table.TableSizeBytes))
+		}
+		// {pk:k1,gp:G1}=8, {pk:k2,gp:G1}=8.
+		putConf(t, c, ctx, "DescT", map[string]types.AttributeValue{"pk": sv("k1"), "gp": sv("G1")})
+		putConf(t, c, ctx, "DescT", map[string]types.AttributeValue{"pk": sv("k2"), "gp": sv("G1")})
+		desc, _ = c.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("DescT")})
+		if aws.ToInt64(desc.Table.ItemCount) != 2 || aws.ToInt64(desc.Table.TableSizeBytes) != 16 {
+			t.Errorf("after puts = (count %d, size %d), want (2, 16)", aws.ToInt64(desc.Table.ItemCount), aws.ToInt64(desc.Table.TableSizeBytes))
+		}
+		// Overwrite k1 larger: {pk:k1,gp:G1,extra:hello}=18; total 18+8=26.
+		putConf(t, c, ctx, "DescT", map[string]types.AttributeValue{"pk": sv("k1"), "gp": sv("G1"), "extra": sv("hello")})
+		desc, _ = c.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("DescT")})
+		if aws.ToInt64(desc.Table.ItemCount) != 2 || aws.ToInt64(desc.Table.TableSizeBytes) != 26 {
+			t.Errorf("after overwrite = (count %d, size %d), want (2, 26)", aws.ToInt64(desc.Table.ItemCount), aws.ToInt64(desc.Table.TableSizeBytes))
+		}
+		// Delete k2: remaining 18.
+		if _, err := c.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+			TableName: aws.String("DescT"),
+			Key:       map[string]types.AttributeValue{"pk": sv("k2")},
+		}); err != nil {
+			t.Fatalf("DeleteItem: %v", err)
+		}
+		desc, _ = c.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("DescT")})
+		if aws.ToInt64(desc.Table.ItemCount) != 1 || aws.ToInt64(desc.Table.TableSizeBytes) != 18 {
+			t.Errorf("after delete = (count %d, size %d), want (1, 18)", aws.ToInt64(desc.Table.ItemCount), aws.ToInt64(desc.Table.TableSizeBytes))
+		}
+	})
+}
+
+// TestConfDescribeTableGsiStats: per-GSI ItemCount/IndexSizeBytes are
+// projection-independent (P-desc: IndexSizeBytes = full-item W1 sum over
+// indexed items regardless of projection), sparse items are excluded, and
+// values are immediate.
+func TestConfDescribeTableGsiStats(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		// Table with three GSIs on gp: ALL, KEYS_ONLY, INCLUDE.
+		if _, err := c.CreateTable(ctx, &dynamodb.CreateTableInput{
+			TableName: aws.String("GsiT"),
+			KeySchema: []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+			AttributeDefinitions: []types.AttributeDefinition{
+				{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+				{AttributeName: aws.String("gp"), AttributeType: types.ScalarAttributeTypeS},
+			},
+			GlobalSecondaryIndexes: []types.GlobalSecondaryIndex{
+				{IndexName: aws.String("g-all"), KeySchema: []types.KeySchemaElement{{AttributeName: aws.String("gp"), KeyType: types.KeyTypeHash}}, Projection: &types.Projection{ProjectionType: types.ProjectionTypeAll}},
+				{IndexName: aws.String("g-keys"), KeySchema: []types.KeySchemaElement{{AttributeName: aws.String("gp"), KeyType: types.KeyTypeHash}}, Projection: &types.Projection{ProjectionType: types.ProjectionTypeKeysOnly}},
+				{IndexName: aws.String("g-incl"), KeySchema: []types.KeySchemaElement{{AttributeName: aws.String("gp"), KeyType: types.KeyTypeHash}}, Projection: &types.Projection{ProjectionType: types.ProjectionTypeInclude, NonKeyAttributes: []string{"proj1"}}},
+			},
+			BillingMode: types.BillingModePayPerRequest,
+		}); err != nil {
+			t.Fatalf("CreateTable: %v", err)
+		}
+		// Wait for all GSIs to be ACTIVE before writing (no-op on the adapter).
+		for _, g := range []string{"g-all", "g-keys", "g-incl"} {
+			waitForGsiActive(t, c, ctx, "GsiT", g)
+		}
+		// {pk:a,gp:G1,proj1:x}=13, {pk:bb,gp:G1,proj1:yy}=15, {pk:ccc}=5 (sparse).
+		putConf(t, c, ctx, "GsiT", map[string]types.AttributeValue{"pk": sv("a"), "gp": sv("G1"), "proj1": sv("x")})
+		putConf(t, c, ctx, "GsiT", map[string]types.AttributeValue{"pk": sv("bb"), "gp": sv("G1"), "proj1": sv("yy")})
+		putConf(t, c, ctx, "GsiT", map[string]types.AttributeValue{"pk": sv("ccc")})
+		desc, err := c.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("GsiT")})
+		if err != nil {
+			t.Fatalf("DescribeTable: %v", err)
+		}
+		// Table: 3 items, 13+15+5=33 bytes.
+		if aws.ToInt64(desc.Table.ItemCount) != 3 || aws.ToInt64(desc.Table.TableSizeBytes) != 33 {
+			t.Errorf("table = (count %d, size %d), want (3, 33)", aws.ToInt64(desc.Table.ItemCount), aws.ToInt64(desc.Table.TableSizeBytes))
+		}
+		// Each GSI: 2 indexed (ccc sparse), 13+15=28 bytes (projection-independent).
+		for _, g := range desc.Table.GlobalSecondaryIndexes {
+			if aws.ToInt64(g.ItemCount) != 2 {
+				t.Errorf("GSI %q count = %d, want 2", aws.ToString(g.IndexName), aws.ToInt64(g.ItemCount))
+			}
+			if aws.ToInt64(g.IndexSizeBytes) != 28 {
+				t.Errorf("GSI %q size = %d, want 28", aws.ToString(g.IndexName), aws.ToInt64(g.IndexSizeBytes))
+			}
 		}
 	})
 }

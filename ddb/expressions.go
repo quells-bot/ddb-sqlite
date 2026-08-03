@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
-	"github.com/quells-bot/ddb-sqlite/internal/expr"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/internal/expr"
 )
 
 // ReturnValues modes. PutItem and DeleteItem accept NONE and ALL_OLD only;
@@ -21,11 +21,12 @@ const (
 // expressionRequest is the expression input for one operation. Update is empty
 // for PutItem and DeleteItem, which have no update expression.
 type expressionRequest struct {
-	Condition string
-	Update    string
-	Filter    string
-	Names     map[string]string
-	Values    map[string]attrval.Value
+	Condition  string
+	Update     string
+	Filter     string
+	Projection string
+	Names      map[string]string
+	Values     map[string]attrval.Value
 }
 
 // preparedExpressions holds one request's bound expressions. A field is nil
@@ -34,6 +35,7 @@ type preparedExpressions struct {
 	Cond   *expr.BoundCondition
 	Update *expr.BoundUpdate
 	Filter *expr.BoundCondition
+	Proj   *expr.BoundProjection
 }
 
 // prepareExpressions parses every expression on the request, validates the
@@ -53,6 +55,7 @@ func prepareExpressions(r expressionRequest) (preparedExpressions, error) {
 	var cond *expr.Condition
 	var upd *expr.Update
 	var filter *expr.Condition
+	var proj *expr.Projection
 	var names, values []string
 
 	if r.Condition != "" {
@@ -85,6 +88,16 @@ func prepareExpressions(r expressionRequest) (preparedExpressions, error) {
 		names = append(names, fn...)
 		values = append(values, fv...)
 	}
+	if r.Projection != "" {
+		pr, err := expr.ParseProjection(r.Projection)
+		if err != nil {
+			return out, fmt.Errorf("%w: ProjectionExpression: %v", ErrValidation, err)
+		}
+		proj = pr
+		pn, pv := pr.Refs()
+		names = append(names, pn...)
+		values = append(values, pv...)
+	}
 
 	if err := expr.CheckUnused(env, names, values); err != nil {
 		return out, fmt.Errorf("%w: %v", ErrValidation, err)
@@ -110,6 +123,13 @@ func prepareExpressions(r expressionRequest) (preparedExpressions, error) {
 			return out, fmt.Errorf("%w: FilterExpression: %v", ErrValidation, err)
 		}
 		out.Filter = b
+	}
+	if proj != nil {
+		b, err := proj.Bind(env)
+		if err != nil {
+			return out, fmt.Errorf("%w: ProjectionExpression: %v", ErrValidation, err)
+		}
+		out.Proj = b
 	}
 	return out, nil
 }

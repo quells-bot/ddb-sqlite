@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
 )
 
 func mustParse(t *testing.T, src string) *Condition {
@@ -384,6 +384,53 @@ func TestUpdateValidateKeyAttrs(t *testing.T) {
 			}
 			if err != nil {
 				t.Errorf("ValidateKeyAttrs(%q) err = %v, want nil", tc.src, err)
+			}
+		})
+	}
+}
+
+// W8 #2: ordering comparators and BETWEEN reject non-scalar :value operands
+// (BOOL/NULL/L/M/sets) at Bind time; S/N/B operands, equality, and IN accept
+// any type. Measured against dynamodb-local 3.3.1.
+func TestBindOrderingOperandType(t *testing.T) {
+	boolV := attrval.NewBool(true)
+	nullV := attrval.NewNull()
+	listV := attrval.NewList([]attrval.Value{attrval.NewString("x")})
+	ssV := attrval.NewStringSet([]string{"a"})
+	strV := attrval.NewString("x")
+	numV, err := attrval.NewNumberString("1")
+	if err != nil {
+		t.Fatalf("NewNumberString: %v", err)
+	}
+	binV := attrval.NewBinary([]byte{1})
+
+	cases := []struct {
+		name   string
+		src    string
+		values map[string]attrval.Value
+		want   error
+	}{
+		{"less than bool operand rejected", "s < :v", map[string]attrval.Value{":v": boolV}, ErrSemantic},
+		{"less-equal null operand rejected", "s <= :v", map[string]attrval.Value{":v": nullV}, ErrSemantic},
+		{"greater than list operand rejected", "s > :v", map[string]attrval.Value{":v": listV}, ErrSemantic},
+		{"greater-equal set operand rejected", "s >= :v", map[string]attrval.Value{":v": ssV}, ErrSemantic},
+		{"between null bounds rejected", "n BETWEEN :lo AND :hi", map[string]attrval.Value{":lo": nullV, ":hi": nullV}, ErrSemantic},
+		{"between bool bounds rejected", "n BETWEEN :lo AND :hi", map[string]attrval.Value{":lo": boolV, ":hi": boolV}, ErrSemantic},
+		{"rejected inside AND", "attribute_exists(pk) AND s < :v", map[string]attrval.Value{":v": boolV}, ErrSemantic},
+		{"string operand accepted", "s < :v", map[string]attrval.Value{":v": strV}, nil},
+		{"number operand accepted", "n >= :v", map[string]attrval.Value{":v": numV}, nil},
+		{"binary operand accepted", "b < :v", map[string]attrval.Value{":v": binV}, nil},
+		{"between string bounds accepted", "s BETWEEN :lo AND :hi", map[string]attrval.Value{":lo": strV, ":hi": strV}, nil},
+		{"equality bool operand accepted", "s = :v", map[string]attrval.Value{":v": boolV}, nil},
+		{"inequality null operand accepted", "s <> :v", map[string]attrval.Value{":v": nullV}, nil},
+		{"in null operand accepted", "s IN (:v)", map[string]attrval.Value{":v": nullV}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := mustParse(t, tc.src)
+			_, err := c.Bind(Env{Values: tc.values})
+			if !errors.Is(err, tc.want) {
+				t.Errorf("Bind err = %v, want %v", err, tc.want)
 			}
 		})
 	}

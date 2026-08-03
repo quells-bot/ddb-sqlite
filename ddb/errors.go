@@ -33,3 +33,10 @@ func (e *ConditionalCheckFailedError) Is(target error) bool {
 // ErrGsiNotFound is returned when IndexName is non-empty but the table has no
 // such GSI (GSIs arrive in M4; in M3 any IndexName is rejected).
 var ErrGsiNotFound = errors.New("ddb: global secondary index not found")
+
+// Engine sentinels for UpdateTable (M6a).
+var (
+	ErrGsiInUse             = errors.New("ddb: global secondary index already exists")
+	ErrLimitExceeded        = errors.New("ddb: limit exceeded")
+	ErrGsiNotFoundForDelete = errors.New("ddb: global secondary index not found")
+)

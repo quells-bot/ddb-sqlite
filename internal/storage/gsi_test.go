@@ -133,11 +133,11 @@ func TestCreateGsiTableAndCascade(t *testing.T) {
 		t.Fatalf("CreateGsiTable: %v", err)
 	}
 
-	id, err := s.PutItem(tx, "T", "k1", nil, []byte("a"))
+	id, err := s.PutItem(tx, "T", "k1", nil, []byte("a"), 0)
 	if err != nil {
 		t.Fatalf("PutItem: %v", err)
 	}
-	if err := s.UpsertGsiRow(tx, "T", "g1", id, "G1", nil); err != nil {
+	if err := s.UpsertGsiRow(tx, "T", "g1", id, "G1", nil, 0); err != nil {
 		t.Fatalf("UpsertGsiRow: %v", err)
 	}
 
@@ -183,15 +183,15 @@ func TestUpsertGsiRowUpdatesKey(t *testing.T) {
 	if err := s.CreateGsiTable(tx, def, gsi); err != nil {
 		t.Fatalf("CreateGsiTable: %v", err)
 	}
-	id, _ := s.PutItem(tx, "T", "k1", nil, []byte("a"))
+	id, _ := s.PutItem(tx, "T", "k1", nil, []byte("a"), 0)
 
 	// First write.
-	if err := s.UpsertGsiRow(tx, "T", "g1", id, "G1", "sk1"); err != nil {
+	if err := s.UpsertGsiRow(tx, "T", "g1", id, "G1", "sk1", 0); err != nil {
 		t.Fatalf("UpsertGsiRow first: %v", err)
 	}
 	// Re-upserting the same data_id with a different index key updates in
 	// place, not an insert/duplicate (data_id is the PRIMARY KEY).
-	if err := s.UpsertGsiRow(tx, "T", "g1", id, "G2", "sk2"); err != nil {
+	if err := s.UpsertGsiRow(tx, "T", "g1", id, "G2", "sk2", 0); err != nil {
 		t.Fatalf("UpsertGsiRow second: %v", err)
 	}
 
@@ -217,7 +217,7 @@ func TestPutItemReturnsDataID(t *testing.T) {
 	defer tx.Rollback()
 
 	s.CreateDataTable(tx, dataDef())
-	id1, err := s.PutItem(tx, "T", "k1", nil, []byte("a"))
+	id1, err := s.PutItem(tx, "T", "k1", nil, []byte("a"), 0)
 	if err != nil {
 		t.Fatalf("PutItem: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestPutItemReturnsDataID(t *testing.T) {
 	// INSERT OR REPLACE on the same key deletes the conflicting row (cascading
 	// away the old GSI row) and inserts a fresh row with a NEW rowid, so the
 	// GSI maintenance caller must re-UpsertGsiRow with the new id.
-	id3, _ := s.PutItem(tx, "T", "k1", nil, []byte("a2"))
+	id3, _ := s.PutItem(tx, "T", "k1", nil, []byte("a2"), 0)
 	if id3 == id1 {
 		t.Errorf("overwrite returned same id %d; REPLACE should assign a new rowid", id1)
 	}
@@ -255,8 +255,8 @@ func seedGsiData(t *testing.T, s *Store, tx *sql.Tx) (string, []int64) {
 		{"C", "c", "G1", "s1", "C"}, // tied sort key with A
 		{"B", "b", "G1", "s2", "B"},
 	} {
-		id, _ := s.PutItem(tx, "G", it.pk, it.sk, []byte(it.blob))
-		s.UpsertGsiRow(tx, "G", "g1", id, it.gpk, it.gsk)
+		id, _ := s.PutItem(tx, "G", it.pk, it.sk, []byte(it.blob), 0)
+		s.UpsertGsiRow(tx, "G", "g1", id, it.gpk, it.gsk, 0)
 		ids = append(ids, id)
 	}
 	return "g1", ids
@@ -385,10 +385,10 @@ func TestQueryGSIPartitionOnly(t *testing.T) {
 	gsi := GsiDef{Name: "g1", Hash: "gsi_pk", HashType: "S", ProjectionType: "KEYS_ONLY"}
 	s.CreateGsiTable(tx, def, gsi)
 
-	id1, _ := s.PutItem(tx, "PO", "k1", nil, []byte("one"))
-	s.UpsertGsiRow(tx, "PO", "g1", id1, "G1", nil)
-	id2, _ := s.PutItem(tx, "PO", "k2", nil, []byte("two"))
-	s.UpsertGsiRow(tx, "PO", "g1", id2, "G1", nil)
+	id1, _ := s.PutItem(tx, "PO", "k1", nil, []byte("one"), 0)
+	s.UpsertGsiRow(tx, "PO", "g1", id1, "G1", nil, 0)
+	id2, _ := s.PutItem(tx, "PO", "k2", nil, []byte("two"), 0)
+	s.UpsertGsiRow(tx, "PO", "g1", id2, "G1", nil, 0)
 
 	blobs, err := s.QueryGSI(tx, "PO", "g1", "G1", nil, nil, true, 0)
 	if err != nil {
@@ -487,8 +487,8 @@ func TestQueryGSICompositePartitionOnlyOrdersByRange(t *testing.T) {
 		{"A", "a", "G1", "s1", "A"},
 		{"C", "c", "G1", "s1", "C"},
 	} {
-		id, _ := s.PutItem(tx, "G", it.pk, it.sk, []byte(it.blob))
-		s.UpsertGsiRow(tx, "G", "g1", id, it.gpk, it.gsk)
+		id, _ := s.PutItem(tx, "G", it.pk, it.sk, []byte(it.blob), 0)
+		s.UpsertGsiRow(tx, "G", "g1", id, it.gpk, it.gsk, 0)
 	}
 
 	// ASC: range order s1(A), s1(C) [data_id tiebreak], s2(B).

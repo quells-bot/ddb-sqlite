@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
-	"github.com/quells-bot/ddb-sqlite/internal/expr"
-	"github.com/quells-bot/ddb-sqlite/internal/storage"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/internal/expr"
+	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
 )
 
 // QueryInput queries one partition by key condition, optionally filtered.
@@ -17,6 +17,7 @@ type QueryInput struct {
 	IndexName                 string
 	KeyConditionExpression    string
 	FilterExpression          string
+	ProjectionExpression      string
 	ExpressionAttributeNames  map[string]string
 	ExpressionAttributeValues map[string]attrval.Value
 
@@ -24,7 +25,7 @@ type QueryInput struct {
 	Limit             int32
 	ScanIndexForward  bool   // true = forward ASC; false = reverse DESC (zero value false). Adapter defaults nil->true.
 	ConsistentRead    bool   // accepted, ignored (engine is always consistent)
-	Select            string // "" (default ALL_ATTRIBUTES) or "COUNT"
+	Select            string // "" (default: ALL_ATTRIBUTES; ALL_PROJECTED_ATTRIBUTES on a non-ALL GSI without projection), "ALL_ATTRIBUTES", "ALL_PROJECTED_ATTRIBUTES" (GSI only), "COUNT", or "SPECIFIC_ATTRIBUTES" (requires ProjectionExpression)
 }
 
 // QueryOutput carries the matching items, counts, and optional resume key.
@@ -40,6 +41,7 @@ type ScanInput struct {
 	TableName                 string
 	IndexName                 string
 	FilterExpression          string
+	ProjectionExpression      string
 	ExpressionAttributeNames  map[string]string
 	ExpressionAttributeValues map[string]attrval.Value
 
@@ -48,7 +50,7 @@ type ScanInput struct {
 	Segment           int32 // 0 when TotalSegments is 0
 	TotalSegments     int32 // 0 = non-parallel scan
 	ConsistentRead    bool
-	Select            string
+	Select            string // "" (default: ALL_ATTRIBUTES; ALL_PROJECTED_ATTRIBUTES on a non-ALL GSI without projection), "ALL_ATTRIBUTES", "ALL_PROJECTED_ATTRIBUTES" (GSI only), "COUNT", or "SPECIFIC_ATTRIBUTES" (requires ProjectionExpression)
 }
 
 // ScanOutput carries the scanned items, counts, and optional resume key.
@@ -59,32 +61,48 @@ type ScanOutput struct {
 	LastEvaluatedKey Item
 }
 
-// validateSelect normalizes "" faithfully to DynamoDB's default: ALL_ATTRIBUTES
-// on a base table, ALL_PROJECTED_ATTRIBUTES on a GSI. On a non-ALL GSI,
-// ALL_ATTRIBUTES is rejected; ALL_PROJECTED_ATTRIBUTES is valid only on a GSI.
-// COUNT is always valid. SPECIFIC_ATTRIBUTES needs ProjectionExpression (v1
-// non-goal). gsiProjection is "" for a base table.
-func validateSelect(s string, gsiProjection string) (string, error) {
+// validateSelect normalizes Select against the GSI projection type and
+// whether a ProjectionExpression is present (spec §4.6). "" defaults to
+// ALL_ATTRIBUTES — on a non-ALL GSI without a projection it defaults to
+// ALL_PROJECTED_ATTRIBUTES instead. COUNT and ALL_PROJECTED_ATTRIBUTES
+// reject an accompanying projection; SPECIFIC_ATTRIBUTES requires one.
+// gsiProjection is "" for a base table.
+func validateSelect(s string, gsiProjection string, hasProjection bool) (string, error) {
 	switch s {
 	case "":
+		if hasProjection {
+			return "ALL_ATTRIBUTES", nil // projection governs returned attrs
+		}
 		if gsiProjection != "" && gsiProjection != "ALL" {
 			return "ALL_PROJECTED_ATTRIBUTES", nil
 		}
 		return "ALL_ATTRIBUTES", nil
 	case "ALL_ATTRIBUTES":
+		if hasProjection && gsiProjection != "" && gsiProjection != "ALL" {
+			return "", fmt.Errorf("%w: Cannot specify the ProjectionExpression when choosing to get ALL_ATTRIBUTES", ErrValidation)
+		}
 		if gsiProjection != "" && gsiProjection != "ALL" {
 			return "", fmt.Errorf("%w: Select type ALL_ATTRIBUTES is not supported for global secondary index because its projection type is not ALL", ErrValidation)
 		}
 		return "ALL_ATTRIBUTES", nil
 	case "ALL_PROJECTED_ATTRIBUTES":
+		if hasProjection {
+			return "", fmt.Errorf("%w: Cannot specify the ProjectionExpression when choosing to get ALL_PROJECTED_ATTRIBUTES", ErrValidation)
+		}
 		if gsiProjection == "" {
 			return "", fmt.Errorf("%w: Select type ALL_PROJECTED_ATTRIBUTES is valid only on a global secondary index", ErrValidation)
 		}
 		return "ALL_PROJECTED_ATTRIBUTES", nil
 	case "COUNT":
+		if hasProjection {
+			return "", fmt.Errorf("%w: Cannot specify the ProjectionExpression when choosing to get only the Count", ErrValidation)
+		}
 		return "COUNT", nil
 	case "SPECIFIC_ATTRIBUTES":
-		return "", fmt.Errorf("%w: Select SPECIFIC_ATTRIBUTES requires ProjectionExpression", ErrValidation)
+		if !hasProjection {
+			return "", fmt.Errorf("%w: Select SPECIFIC_ATTRIBUTES requires ProjectionExpression", ErrValidation)
+		}
+		return "SPECIFIC_ATTRIBUTES", nil
 	default:
 		return "", fmt.Errorf("%w: Select %q is not a valid value", ErrValidation, s)
 	}
@@ -117,6 +135,9 @@ func beginsWithSuccessor(prefix []byte) any {
 // Query selects items from one partition by key condition, optionally filtered.
 // See M3 spec §4.5 for the operation flow.
 func (c *Client) Query(ctx context.Context, in QueryInput) (QueryOutput, error) {
+	if err := validateTableName(in.TableName); err != nil {
+		return QueryOutput{}, err
+	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return QueryOutput{}, err
@@ -147,7 +168,7 @@ func (c *Client) Query(ctx context.Context, in QueryInput) (QueryOutput, error) 
 		gsiProjection = gsiDef.ProjectionType
 	}
 
-	selectMode, err := validateSelect(in.Select, gsiProjection)
+	selectMode, err := validateSelect(in.Select, gsiProjection, in.ProjectionExpression != "")
 	if err != nil {
 		return QueryOutput{}, err
 	}
@@ -155,10 +176,11 @@ func (c *Client) Query(ctx context.Context, in QueryInput) (QueryOutput, error) 
 	// Parse/bind expressions. An empty KeyConditionExpression fails as a parse
 	// error → ErrValidation, the same exception type DynamoDB raises.
 	ex, err := prepareExpressions(expressionRequest{
-		Condition: in.KeyConditionExpression,
-		Filter:    in.FilterExpression,
-		Names:     in.ExpressionAttributeNames,
-		Values:    in.ExpressionAttributeValues,
+		Condition:  in.KeyConditionExpression,
+		Filter:     in.FilterExpression,
+		Projection: in.ProjectionExpression,
+		Names:      in.ExpressionAttributeNames,
+		Values:     in.ExpressionAttributeValues,
 	})
 	if err != nil {
 		return QueryOutput{}, err
@@ -214,6 +236,20 @@ func (c *Client) Query(ctx context.Context, in QueryInput) (QueryOutput, error) 
 	if ex.Filter != nil {
 		if err := ex.Filter.ValidateFilterKeys(filterKeyAttrs); err != nil {
 			return QueryOutput{}, fmt.Errorf("%w: %v", ErrValidation, err)
+		}
+	}
+
+	// GSI projection restriction: on a GSI read, a ProjectionExpression may
+	// name only attributes the index projects (table keys ∪ GSI keys ∪
+	// top-level INCLUDE attrs; nested INCLUDE entries contribute nothing —
+	// spec §4.7). gsiProjectionAttrs returns nil for ALL (no restriction).
+	if in.IndexName != "" && ex.Proj != nil {
+		if keep := gsiProjectionAttrs(def, gsiDef); keep != nil {
+			for _, p := range ex.Proj.Paths() {
+				if !keep[p[0].Name] {
+					return QueryOutput{}, fmt.Errorf("%w: One or more parameter values were invalid: Global secondary index %s does not project [%s]", ErrValidation, in.IndexName, p[0].Name)
+				}
+			}
 		}
 	}
 
@@ -302,6 +338,9 @@ func (c *Client) Query(ctx context.Context, in QueryInput) (QueryOutput, error) 
 		}
 		if keep {
 			count++
+			if ex.Proj != nil {
+				item = attrval.Project(item, ex.Proj.Paths())
+			}
 			items = append(items, item)
 		}
 	}
@@ -412,6 +451,9 @@ func translateSortCond(sort *expr.SortKeyCond, def storage.TableDef, scanForward
 // Scan selects all items from a table (or one parallel segment), optionally
 // filtered. See M3 spec §4.6 for the operation flow.
 func (c *Client) Scan(ctx context.Context, in ScanInput) (ScanOutput, error) {
+	if err := validateTableName(in.TableName); err != nil {
+		return ScanOutput{}, err
+	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return ScanOutput{}, err
@@ -443,7 +485,7 @@ func (c *Client) Scan(ctx context.Context, in ScanInput) (ScanOutput, error) {
 		}
 	}
 
-	selectMode, err := validateSelect(in.Select, gsiProjection)
+	selectMode, err := validateSelect(in.Select, gsiProjection, in.ProjectionExpression != "")
 	if err != nil {
 		return ScanOutput{}, err
 	}
@@ -461,13 +503,16 @@ func (c *Client) Scan(ctx context.Context, in ScanInput) (ScanOutput, error) {
 		return ScanOutput{}, fmt.Errorf("%w: Segment must be 0 when TotalSegments is 0", ErrValidation)
 	}
 
-	// Parse/bind filter.
+	// Parse/bind expressions. The gate fires on ANY expression or substitution
+	// map — not just the filter — so the unused-check rejects names-only and
+	// values-only requests symmetrically (spec §3.3).
 	var ex preparedExpressions
-	if in.FilterExpression != "" {
+	if in.FilterExpression != "" || in.ProjectionExpression != "" || len(in.ExpressionAttributeNames) > 0 || len(in.ExpressionAttributeValues) > 0 {
 		ex, err = prepareExpressions(expressionRequest{
-			Filter: in.FilterExpression,
-			Names:  in.ExpressionAttributeNames,
-			Values: in.ExpressionAttributeValues,
+			Filter:     in.FilterExpression,
+			Projection: in.ProjectionExpression,
+			Names:      in.ExpressionAttributeNames,
+			Values:     in.ExpressionAttributeValues,
 		})
 		if err != nil {
 			return ScanOutput{}, err
@@ -479,6 +524,16 @@ func (c *Client) Scan(ctx context.Context, in ScanInput) (ScanOutput, error) {
 		if ex.Filter != nil {
 			if err := ex.Filter.ValidateFilterKeys(filterKeyAttrs); err != nil {
 				return ScanOutput{}, fmt.Errorf("%w: %v", ErrValidation, err)
+			}
+		}
+		// GSI projection restriction — identical to Query (spec §4.4).
+		if in.IndexName != "" && ex.Proj != nil {
+			if keep := gsiProjectionAttrs(def, gsiDef); keep != nil {
+				for _, p := range ex.Proj.Paths() {
+					if !keep[p[0].Name] {
+						return ScanOutput{}, fmt.Errorf("%w: One or more parameter values were invalid: Global secondary index %s does not project [%s]", ErrValidation, in.IndexName, p[0].Name)
+					}
+				}
 			}
 		}
 	}
@@ -554,6 +609,9 @@ func (c *Client) Scan(ctx context.Context, in ScanInput) (ScanOutput, error) {
 		}
 		if keep {
 			count++
+			if ex.Proj != nil {
+				item = attrval.Project(item, ex.Proj.Paths())
+			}
 			items = append(items, item)
 		}
 	}

@@ -140,6 +140,16 @@ func (s *Store) DeleteGsiDefs(tx *sql.Tx, tableID int64) error {
 	return nil
 }
 
+// DeleteGsiDef removes one GSI definition for a table (used by UpdateTable
+// remove). Returns nil whether or not the row existed; the ddb layer checks
+// existence and returns ErrGsiNotFoundForDelete before calling this.
+func (s *Store) DeleteGsiDef(tx *sql.Tx, tableID int64, name string) error {
+	if _, err := tx.Exec(`DELETE FROM ddb_gsi_defs WHERE table_id = ? AND name = ?`, tableID, name); err != nil {
+		return fmt.Errorf("storage: delete gsi def: %w", err)
+	}
+	return nil
+}
+
 func scanGsiDefs(rows *sql.Rows) ([]GsiDef, error) {
 	var out []GsiDef
 	for rows.Next() {

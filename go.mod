@@ -1,4 +1,4 @@
-module github.com/quells-bot/ddb-sqlite
+module github.com/quells-bot/ddb-sqlite-core
 
 go 1.25.0
 

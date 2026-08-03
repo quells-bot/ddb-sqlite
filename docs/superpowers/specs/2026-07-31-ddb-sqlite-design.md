@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-31
 **Status:** Approved (brainstorming) → pending implementation plan
-**Module (today):** `github.com/quells-bot/ddb-sqlite` (single Go module; adapter splits to its own module before public release)
+**Module (today):** `github.com/quells-bot/ddb-sqlite-core` (single Go module; adapter splits to its own module before public release)
 
 ## 1. Overview & Goals
 
@@ -13,7 +13,7 @@ Goals:
 - Provide a **drop-in replacement for the AWS SDK v2 DynamoDB client** for the supported API subset.
 - The **core library must not depend on the AWS SDK**. A child adapter package that *does* depend on the SDK provides the integration layer; it lives in this repo during development and is pulled into its own Go module before public release.
 - Support **multiple mocked tables in a single "AWS region"** (one engine instance = one region = one SQLite DB).
-- **Parse and execute condition, filter, and update expressions.** Projection expressions are out of scope for v1.
+- **Parse and execute condition, filter, and update expressions.** Projection expressions (`ProjectionExpression` + `ExpressionAttributeNames`) are honored on GetItem, Query, Scan, and BatchGetItem (M6B).
 - Use the **CGO-free `modernc.org/sqlite`** package to avoid cross-compilation headaches.
 - Provide **Global Secondary Index (GSI)** features.
 
@@ -25,12 +25,12 @@ Non-goals (explicitly out of scope for v1):
 - Automatic streaming events (`StreamSpecification`).
 - Provisioned-capacity throttling and consumed-capacity accounting.
 - `TransactWriteItems` / `TransactGetItems`, PartiQL / `ExecuteStatement` / `ExecuteTransaction` / `BatchExecuteStatement`.
-- Backups, point-in-time recovery, autoscaling, a background TTL reaper, and `ProjectionExpression`.
+- Backups, point-in-time recovery, autoscaling, and a background TTL reaper.
 
 ## 2. Architecture: core / adapter split
 
 ```
-ddb-sqlite/                      # module github.com/quells-bot/ddb-sqlite  (SDK-free)
+ddb-sqlite/                      # module github.com/quells-bot/ddb-sqlite-core  (SDK-free)
 ├─ go.mod
 ├─ attrval/                       # IMPORTABLE: DynamoDB typed-value model + wire encode/decode
 ├─ ddb/                           # IMPORTABLE: the engine (Client, operations, exported errors)
@@ -176,7 +176,7 @@ One lexer + parser produces an AST; one evaluator serves condition **and** filte
 - **`UpdateItem`:** read-modify-write the `data` blob via the update evaluator; `ConditionExpression` pre-check; `ReturnValues` honored. Maintain GSI keys + TTL.
 - **`DeleteItem`:** key delete with condition check; cascade-delete GSI index rows.
 - **`BatchWriteItem`:** up to 25 requests / 16MB per DynamoDB; each request runs in the shared tx. With no throttling in v1, all valid requests are processed and `UnprocessedItems` is always empty; batches exceeding 25 requests or 16MB raise `ErrValidation` → `ValidationException` (no partial processing).
-- **`BatchGetItem`:** up to 100 items / 16MB; per-table key lists; TTL filtering; `ProjectionExpression` out of scope (full items returned, faithful to "no projection in v1").
+- **`BatchGetItem`:** up to 100 items / 16MB; per-table key lists; TTL filtering; `ProjectionExpression` honored per-table (M6B).
 
 ### 6.3 Query
 
@@ -184,10 +184,11 @@ One lexer + parser produces an AST; one evaluator serves condition **and** filte
 - `ScanIndexForward` controls ASC/DESC sort order; `Limit` is a *read budget* applied **before** `FilterExpression` and **after** the sort-key condition narrows the candidate set. `ExclusiveStartKey` resumes from a key; `LastEvaluatedKey` follows the stop-reason rules in §6.5.
 - `FilterExpression` evaluated **in Go** after the key scan; filtered-out items still count toward `Limit`/`ScannedCount`. Both `ScannedCount` and `Count` reported.
 - `IndexName` → query the GSI index table instead (sparse semantics); GSI projection applied at fetch.
+- `ProjectionExpression` honored (M6B): applied per-item after the filter; `Select` follows the full DynamoDB model (`SPECIFIC_ATTRIBUTES` requires it, `COUNT`/`ALL_PROJECTED_ATTRIBUTES` reject it); on a GSI it may name only attributes the index projects.
 
 ### 6.4 Scan
 
-Full table scan (or GSI scan via `IndexName`), ordered by rowid within a partition; cross-partition order is undefined. `Limit`/`ExclusiveStartKey`/`LastEvaluatedKey`/`FilterExpression` follow the same contract as Query (§6.5), including the `ScannedCount`/`Count` split and the LEK stop-reason rule. `Segment`/`TotalSegments` for parallel scan — honored by partitioning the rowid range so parallel scans don't overlap.
+Full table scan (or GSI scan via `IndexName`), ordered by rowid within a partition; cross-partition order is undefined. `Limit`/`ExclusiveStartKey`/`LastEvaluatedKey`/`FilterExpression` follow the same contract as Query (§6.5), including the `ScannedCount`/`Count` split and the LEK stop-reason rule. `Segment`/`TotalSegments` for parallel scan — honored by partitioning the rowid range so parallel scans don't overlap. `ProjectionExpression` honored with the same contract as Query (M6B).
 
 ### 6.5 Pagination semantics (faithful)
 
@@ -263,7 +264,6 @@ db.SetConnMaxLifetime(0)
 - Provisioned-capacity throttling and consumed-capacity accounting.
 - Eventual-consistency simulation.
 - Background TTL reaper (lazy only).
-- `ProjectionExpression` (items returned in full).
 
 ## 9. Testing strategy
 

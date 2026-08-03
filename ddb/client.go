@@ -7,7 +7,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/quells-bot/ddb-sqlite/internal/storage"
+	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
 )
 
 // Options configures a Client. DSN is a file path, ":memory:", or a

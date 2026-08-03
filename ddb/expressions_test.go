@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
-	"github.com/quells-bot/ddb-sqlite/internal/expr"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/internal/expr"
 )
 
 func TestPrepareCondition(t *testing.T) {
@@ -329,5 +329,52 @@ func TestProjectReturnValues(t *testing.T) {
 	// UPDATED_NEW omits attributes the update removed.
 	if got := projectReturnValues(returnValuesUpdatedNew, old, Item{"pk": attrval.NewString("k")}, []expr.TouchedAttribute{{Name: "a", OldExisted: true, Modified: false}}); got != nil {
 		t.Errorf("UPDATED_NEW after a REMOVE = %v, want nil", got)
+	}
+}
+
+func TestPrepareExpressionsProjection(t *testing.T) {
+	// A #name referenced only by the projection is not reported unused.
+	ex, err := prepareExpressions(expressionRequest{
+		Projection: "#t, obj.a",
+		Names:      map[string]string{"#t": "top"},
+	})
+	if err != nil {
+		t.Fatalf("projection-only names: %v", err)
+	}
+	if ex.Proj == nil {
+		t.Fatal("Proj = nil, want bound projection")
+	}
+	if len(ex.Proj.Paths()) != 2 {
+		t.Errorf("len(Paths) = %d, want 2", len(ex.Proj.Paths()))
+	}
+
+	// A #name no expression references is still rejected.
+	if _, err := prepareExpressions(expressionRequest{
+		Projection: "top",
+		Names:      map[string]string{"#x": "other"},
+	}); !errors.Is(err, ErrValidation) {
+		t.Errorf("unused name: err = %v, want ErrValidation", err)
+	}
+
+	// Refs union across expressions: condition's #c/:v plus projection's #p.
+	ex, err = prepareExpressions(expressionRequest{
+		Condition:  "#c = :v",
+		Projection: "#p",
+		Names:      map[string]string{"#c": "a", "#p": "b"},
+		Values:     map[string]attrval.Value{":v": attrval.NewString("x")},
+	})
+	if err != nil {
+		t.Fatalf("joint refs: %v", err)
+	}
+	if ex.Cond == nil || ex.Proj == nil {
+		t.Error("Cond and Proj should both be bound")
+	}
+
+	// Parse and overlap failures surface as ErrValidation.
+	if _, err := prepareExpressions(expressionRequest{Projection: "a = :v"}); !errors.Is(err, ErrValidation) {
+		t.Errorf("bad projection: err = %v, want ErrValidation", err)
+	}
+	if _, err := prepareExpressions(expressionRequest{Projection: "obj, obj.a"}); !errors.Is(err, ErrValidation) {
+		t.Errorf("overlap: err = %v, want ErrValidation", err)
 	}
 }

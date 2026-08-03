@@ -148,3 +148,32 @@ func TestUpdateTableTTL(t *testing.T) {
 		t.Errorf("after disable: TTL = %q, want empty", def.TTL)
 	}
 }
+
+func TestDeleteGsiDef(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	tx, _ := s.BeginTx(ctx)
+	defer tx.Rollback()
+
+	id, _ := s.InsertTableDef(tx, TableDef{
+		Name: "T", Hash: "pk", HashType: "S",
+		Meta: json.RawMessage(`{}`),
+	})
+	s.InsertGsiDef(tx, id, GsiDef{Name: "g1", Hash: "a", HashType: "S", ProjectionType: "ALL"})
+	s.InsertGsiDef(tx, id, GsiDef{Name: "g2", Hash: "b", HashType: "S", ProjectionType: "ALL"})
+
+	if err := s.DeleteGsiDef(tx, id, "g1"); err != nil {
+		t.Fatalf("DeleteGsiDef: %v", err)
+	}
+	got, err := s.GetGsiDefs(tx, id)
+	if err != nil {
+		t.Fatalf("GetGsiDefs: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "g2" {
+		t.Errorf("after delete got %v, want [g2]", got)
+	}
+	// Deleting a missing name is a no-op (existence is checked at the ddb layer).
+	if err := s.DeleteGsiDef(tx, id, "nope"); err != nil {
+		t.Errorf("delete missing: %v, want nil", err)
+	}
+}

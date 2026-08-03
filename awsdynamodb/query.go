@@ -8,7 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/smithy-go"
 
-	"github.com/quells-bot/ddb-sqlite/ddb"
+	"github.com/quells-bot/ddb-sqlite-core/ddb"
 )
 
 // rejectLegacyQuery refuses the deprecated pre-expression parameters on Query.
@@ -40,7 +40,11 @@ func (a *Adapter) Query(ctx context.Context, params *dynamodb.QueryInput, optFns
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectEmptySubMaps(keyCond, filter, params.ExpressionAttributeNames, params.ExpressionAttributeValues); err != nil {
+	proj, err := exprString(params.ProjectionExpression, "ProjectionExpression")
+	if err != nil {
+		return nil, err
+	}
+	if err := rejectEmptySubMaps(params.ExpressionAttributeNames, params.ExpressionAttributeValues, keyCond, filter, proj); err != nil {
 		return nil, err
 	}
 	// Present-but-zero Limit → ValidationException (only the adapter can
@@ -63,6 +67,7 @@ func (a *Adapter) Query(ctx context.Context, params *dynamodb.QueryInput, optFns
 		TableName:                 aws.ToString(params.TableName),
 		KeyConditionExpression:    keyCond,
 		FilterExpression:          filter,
+		ProjectionExpression:      proj,
 		ExpressionAttributeNames:  params.ExpressionAttributeNames,
 		ExpressionAttributeValues: values,
 		ExclusiveStartKey:         esk,
@@ -110,7 +115,11 @@ func (a *Adapter) Scan(ctx context.Context, params *dynamodb.ScanInput, optFns .
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectEmptySubMaps(filter, "", params.ExpressionAttributeNames, params.ExpressionAttributeValues); err != nil {
+	proj, err := exprString(params.ProjectionExpression, "ProjectionExpression")
+	if err != nil {
+		return nil, err
+	}
+	if err := rejectEmptySubMaps(params.ExpressionAttributeNames, params.ExpressionAttributeValues, filter, proj); err != nil {
 		return nil, err
 	}
 	// Present-but-zero Limit → ValidationException.
@@ -131,6 +140,7 @@ func (a *Adapter) Scan(ctx context.Context, params *dynamodb.ScanInput, optFns .
 	out, err := a.client.Scan(ctx, ddb.ScanInput{
 		TableName:                 aws.ToString(params.TableName),
 		FilterExpression:          filter,
+		ProjectionExpression:      proj,
 		ExpressionAttributeNames:  params.ExpressionAttributeNames,
 		ExpressionAttributeValues: values,
 		ExclusiveStartKey:         esk,

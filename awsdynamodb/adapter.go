@@ -14,8 +14,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
-	"github.com/quells-bot/ddb-sqlite/ddb"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/ddb"
 )
 
 // Adapter implements the supported subset of the SDK's DynamoDBAPI methods
@@ -67,6 +67,12 @@ func mapError(err error) error {
 		return &types.ResourceInUseException{Message: aws.String(err.Error())}
 	case errors.Is(err, ddb.ErrGsiNotFound):
 		return &smithy.GenericAPIError{Code: "ValidationException", Message: err.Error()}
+	case errors.Is(err, ddb.ErrGsiInUse):
+		return &types.ResourceInUseException{Message: aws.String(err.Error())}
+	case errors.Is(err, ddb.ErrGsiNotFoundForDelete):
+		return &types.ResourceNotFoundException{Message: aws.String(err.Error())}
+	case errors.Is(err, ddb.ErrLimitExceeded):
+		return &types.LimitExceededException{Message: aws.String(err.Error())}
 	case errors.Is(err, ddb.ErrValidation):
 		// DynamoDB has no generated ValidationException type; real DynamoDB
 		// surfaces 400/validation failures as a generic API error carrying the
@@ -170,8 +176,17 @@ func exprString(p *string, field string) (string, error) {
 // ValidationException; the SDK omits an empty map from the payload when no
 // expression is present, so the service never sees it. Only the adapter can
 // distinguish nil from empty here — the engine's input structs use plain maps.
-func rejectEmptySubMaps(cond, update string, names map[string]string, values map[string]types.AttributeValue) error {
-	if cond == "" && update == "" {
+// exprs carries every expression string the op supports (condition, update,
+// filter, key-condition, projection); any non-empty one counts.
+func rejectEmptySubMaps(names map[string]string, values map[string]types.AttributeValue, exprs ...string) error {
+	present := false
+	for _, e := range exprs {
+		if e != "" {
+			present = true
+			break
+		}
+	}
+	if !present {
 		return nil
 	}
 	if names != nil && len(names) == 0 {
@@ -220,7 +235,7 @@ func (a *Adapter) PutItem(ctx context.Context, params *dynamodb.PutItemInput, op
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectEmptySubMaps(cond, "", params.ExpressionAttributeNames, params.ExpressionAttributeValues); err != nil {
+	if err := rejectEmptySubMaps(params.ExpressionAttributeNames, params.ExpressionAttributeValues, cond); err != nil {
 		return nil, err
 	}
 	item, err := FromSDKMap(params.Item)
@@ -250,12 +265,44 @@ func (a *Adapter) PutItem(ctx context.Context, params *dynamodb.PutItemInput, op
 	return res, nil
 }
 
+// rejectLegacyGetItem refuses the deprecated pre-expression parameters on
+// GetItem, symmetric with rejectLegacyQuery/rejectLegacyScan. Without it the
+// legacy AttributesToGet is silently ignored — neither honored nor rejected —
+// and the mixed projection+AttributesToGet case can only match the reference
+// by rejecting. AttributesToGet alone is functional on the reference;
+// rejecting it is the same deliberate divergence class as Query/Scan.
+func rejectLegacyGetItem(params *dynamodb.GetItemInput) error {
+	if len(params.AttributesToGet) > 0 {
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: GetItem: the legacy AttributesToGet parameter is not supported; use ProjectionExpression"}
+	}
+	return nil
+}
+
 func (a *Adapter) GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
+	if err := rejectLegacyGetItem(params); err != nil {
+		return nil, err
+	}
+	// exprString, NOT aws.ToString: a present-but-empty ProjectionExpression
+	// is a ValidationException, and only the adapter can distinguish
+	// aws.String("") from nil.
+	proj, err := exprString(params.ProjectionExpression, "ProjectionExpression")
+	if err != nil {
+		return nil, err
+	}
+	if err := rejectEmptySubMaps(params.ExpressionAttributeNames, nil, proj); err != nil {
+		return nil, err
+	}
 	key, err := FromSDKMap(params.Key)
 	if err != nil {
 		return nil, mapError(fmt.Errorf("%w: %v", ddb.ErrValidation, err))
 	}
-	out, err := a.client.GetItem(ctx, ddb.GetItemInput{TableName: aws.ToString(params.TableName), Key: key, ConsistentRead: aws.ToBool(params.ConsistentRead)})
+	out, err := a.client.GetItem(ctx, ddb.GetItemInput{
+		TableName:                aws.ToString(params.TableName),
+		Key:                      key,
+		ConsistentRead:           aws.ToBool(params.ConsistentRead),
+		ProjectionExpression:     proj,
+		ExpressionAttributeNames: params.ExpressionAttributeNames,
+	})
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -273,7 +320,7 @@ func (a *Adapter) DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInp
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectEmptySubMaps(cond, "", params.ExpressionAttributeNames, params.ExpressionAttributeValues); err != nil {
+	if err := rejectEmptySubMaps(params.ExpressionAttributeNames, params.ExpressionAttributeValues, cond); err != nil {
 		return nil, err
 	}
 	key, err := FromSDKMap(params.Key)
@@ -320,7 +367,7 @@ func (a *Adapter) UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInp
 	if err != nil {
 		return nil, err
 	}
-	if err := rejectEmptySubMaps(cond, update, params.ExpressionAttributeNames, params.ExpressionAttributeValues); err != nil {
+	if err := rejectEmptySubMaps(params.ExpressionAttributeNames, params.ExpressionAttributeValues, cond, update); err != nil {
 		return nil, err
 	}
 	key, err := FromSDKMap(params.Key)
@@ -357,6 +404,7 @@ func (a *Adapter) UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInp
 func toSDKTableDescription(d ddb.TableDescription) *types.TableDescription {
 	td := &types.TableDescription{
 		TableName:        aws.String(d.Name),
+		TableStatus:      types.TableStatusActive,
 		CreationDateTime: aws.Time(d.CreationTime),
 	}
 	if d.Hash != "" {
@@ -372,7 +420,8 @@ func toSDKTableDescription(d ddb.TableDescription) *types.TableDescription {
 	}
 	for _, g := range d.GlobalSecondaryIndexes {
 		gd := types.GlobalSecondaryIndexDescription{
-			IndexName: aws.String(g.IndexName),
+			IndexName:   aws.String(g.IndexName),
+			IndexStatus: types.IndexStatusActive,
 		}
 		for _, k := range g.KeySchema {
 			kt := types.KeyTypeHash
@@ -382,10 +431,12 @@ func toSDKTableDescription(d ddb.TableDescription) *types.TableDescription {
 			gd.KeySchema = append(gd.KeySchema, types.KeySchemaElement{AttributeName: aws.String(k.AttributeName), KeyType: kt})
 		}
 		gd.Projection = &types.Projection{ProjectionType: types.ProjectionType(g.Projection.Type), NonKeyAttributes: g.Projection.NonKeyAttributes}
-		gd.ItemCount = aws.Int64(0)
-		gd.IndexSizeBytes = aws.Int64(0)
+		gd.ItemCount = aws.Int64(g.ItemCount)
+		gd.IndexSizeBytes = aws.Int64(g.IndexSizeBytes)
 		td.GlobalSecondaryIndexes = append(td.GlobalSecondaryIndexes, gd)
 	}
+	td.ItemCount = aws.Int64(d.ItemCount)
+	td.TableSizeBytes = aws.Int64(d.TableSizeBytes)
 	return td
 }
 
@@ -474,11 +525,19 @@ func (a *Adapter) BatchWriteItem(ctx context.Context, params *dynamodb.BatchWrit
 }
 
 // BatchGetItem translates per-table SDK key lists to the engine and maps the
-// engine Responses back. Projection fields pass through: the engine rejects
-// them (v1 non-goal, spec §1.1.3) so tests don't believe a projection ran.
+// engine Responses back. The pointer-level checks the engine's plain-string
+// API cannot express live here: a present-but-empty ProjectionExpression and
+// a present-but-empty ExpressionAttributeNames map accompanying one are
+// ValidationExceptions (parity with exprString/rejectEmptySubMaps).
 func (a *Adapter) BatchGetItem(ctx context.Context, params *dynamodb.BatchGetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error) {
 	req := make(map[string]ddb.KeysAndAttributes, len(params.RequestItems))
 	for table, ka := range params.RequestItems {
+		if ka.ProjectionExpression != nil && *ka.ProjectionExpression == "" {
+			return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: BatchGetItem: ProjectionExpression must not be empty"}
+		}
+		if ka.ProjectionExpression != nil && ka.ExpressionAttributeNames != nil && len(ka.ExpressionAttributeNames) == 0 {
+			return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: BatchGetItem: ExpressionAttributeNames must not be empty when an expression is present"}
+		}
 		keys := make([]ddb.Item, 0, len(ka.Keys))
 		for _, k := range ka.Keys {
 			key, err := FromSDKMap(k)
@@ -510,6 +569,132 @@ func (a *Adapter) BatchGetItem(ctx context.Context, params *dynamodb.BatchGetIte
 			res.Responses[table] = list
 		}
 	}
-	// v1: UnprocessedKeys is always empty (no throttling).
+	// 16MiB response-cap spill (M6c W6): echo each spilled table's
+	// KeysAndAttributes with only the unprocessed keys.
+	if len(out.UnprocessedKeys) > 0 {
+		res.UnprocessedKeys = make(map[string]types.KeysAndAttributes, len(out.UnprocessedKeys))
+		for table, ka := range out.UnprocessedKeys {
+			keys := make([]map[string]types.AttributeValue, 0, len(ka.Keys))
+			for _, k := range ka.Keys {
+				keys = append(keys, ToSDKMap(k))
+			}
+			echo := types.KeysAndAttributes{Keys: keys}
+			if ka.ConsistentRead {
+				echo.ConsistentRead = aws.Bool(true)
+			}
+			if ka.ProjectionExpression != "" {
+				echo.ProjectionExpression = aws.String(ka.ProjectionExpression)
+			}
+			if len(ka.ExpressionAttributeNames) > 0 {
+				echo.ExpressionAttributeNames = ka.ExpressionAttributeNames
+			}
+			res.UnprocessedKeys[table] = echo
+		}
+	}
 	return res, nil
+}
+
+// ignoredFieldsPresent reports whether any non-GSI-update field of an
+// UpdateTableInput is set. The checklist is exactly the non-GSI-update fields of
+// dynamodb.UpdateTableInput (SDK v1.62.3): enums present iff non-empty,
+// pointers present iff non-nil, slices present iff non-empty.
+func ignoredFieldsPresent(p *dynamodb.UpdateTableInput) bool {
+	if p.BillingMode != "" {
+		return true
+	}
+	if p.TableClass != "" {
+		return true
+	}
+	if p.MultiRegionConsistency != "" {
+		return true
+	}
+	if p.GlobalTableSettingsReplicationMode != "" {
+		return true
+	}
+	if p.ProvisionedThroughput != nil {
+		return true
+	}
+	if p.StreamSpecification != nil {
+		return true
+	}
+	if p.SSESpecification != nil {
+		return true
+	}
+	if p.DeletionProtectionEnabled != nil {
+		return true
+	}
+	if p.OnDemandThroughput != nil {
+		return true
+	}
+	if p.WarmThroughput != nil {
+		return true
+	}
+	if len(p.ReplicaUpdates) > 0 {
+		return true
+	}
+	if len(p.GlobalTableWitnessUpdates) > 0 {
+		return true
+	}
+	return false
+}
+
+// UpdateTable translates SDK UpdateTableInput to the engine. It validates the
+// structural limits the engine cannot see (>1 GSI update entry, a GSI
+// throughput Update combined with any other operation), drops ignored
+// fields into NonGsiFieldsPresent, and routes each Create/Delete action to a
+// core union entry. A lone Update action is accepted-and-ignored (no core
+// entry). mapError is the single error-mapping point.
+func (a *Adapter) UpdateTable(ctx context.Context, params *dynamodb.UpdateTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateTableOutput, error) {
+	if len(params.GlobalSecondaryIndexUpdates) > 1 {
+		return nil, mapError(fmt.Errorf("%w: at most one GlobalSecondaryIndexUpdates entry per UpdateTable", ddb.ErrValidation))
+	}
+	nonGsi := ignoredFieldsPresent(params)
+	gsiUpdatePresent := false
+	for _, u := range params.GlobalSecondaryIndexUpdates {
+		if u.Update != nil {
+			gsiUpdatePresent = true
+		}
+	}
+	if gsiUpdatePresent && nonGsi {
+		return nil, mapError(fmt.Errorf("%w: cannot combine a GSI throughput Update with other UpdateTable operations", ddb.ErrValidation))
+	}
+
+	in := ddb.UpdateTableInput{
+		TableName:           aws.ToString(params.TableName),
+		NonGsiFieldsPresent: nonGsi || gsiUpdatePresent, // a lone Update counts as an ignored operation
+	}
+	for _, ad := range params.AttributeDefinitions {
+		in.AttributeDefinitions = append(in.AttributeDefinitions, ddb.AttributeDefinition{
+			AttributeName: aws.ToString(ad.AttributeName), AttributeType: string(ad.AttributeType),
+		})
+	}
+	for _, u := range params.GlobalSecondaryIndexUpdates {
+		switch {
+		case u.Create != nil:
+			gsi := ddb.GlobalSecondaryIndex{IndexName: aws.ToString(u.Create.IndexName)}
+			for _, k := range u.Create.KeySchema {
+				gsi.KeySchema = append(gsi.KeySchema, ddb.KeySchemaElement{
+					AttributeName: aws.ToString(k.AttributeName), KeyType: string(k.KeyType),
+				})
+			}
+			if u.Create.Projection != nil {
+				gsi.Projection = ddb.Projection{
+					Type:             string(u.Create.Projection.ProjectionType),
+					NonKeyAttributes: u.Create.Projection.NonKeyAttributes,
+				}
+			}
+			in.GlobalSecondaryIndexUpdates = append(in.GlobalSecondaryIndexUpdates, ddb.GlobalSecondaryIndexUpdate{Create: &gsi})
+		case u.Delete != nil:
+			name := aws.ToString(u.Delete.IndexName)
+			in.GlobalSecondaryIndexUpdates = append(in.GlobalSecondaryIndexUpdates, ddb.GlobalSecondaryIndexUpdate{Delete: &name})
+		default:
+			// Update action: produces no core entry (accepted-and-ignored when lone).
+		}
+	}
+
+	out, err := a.client.UpdateTable(ctx, in)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return &dynamodb.UpdateTableOutput{TableDescription: toSDKTableDescription(out.TableDescription)}, nil
 }

@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
-	"github.com/quells-bot/ddb-sqlite/internal/expr"
-	"github.com/quells-bot/ddb-sqlite/internal/storage"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/internal/expr"
+	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
 )
 
 // UpdateItemInput carries the key to update, the update and condition
@@ -49,6 +49,9 @@ func keyAttrs(def storage.TableDef) []string {
 // for the whole read-modify-write is what makes the operation atomic; no extra
 // locking is needed.
 func (c *Client) UpdateItem(ctx context.Context, in UpdateItemInput) (UpdateItemOutput, error) {
+	if err := validateTableName(in.TableName); err != nil {
+		return UpdateItemOutput{}, err
+	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return UpdateItemOutput{}, err
@@ -153,19 +156,23 @@ func (c *Client) UpdateItem(ctx context.Context, in UpdateItemInput) (UpdateItem
 	if err != nil {
 		return UpdateItemOutput{}, fmt.Errorf("%w: marshal item: %v", ErrValidation, err)
 	}
-	if len(wire) > maxItemBytes {
-		return UpdateItemOutput{}, fmt.Errorf("%w: item size %d exceeds %d bytes", ErrValidation, len(wire), maxItemBytes)
+	size, depth := itemSize(updated)
+	if size > maxItemSize {
+		return UpdateItemOutput{}, fmt.Errorf("%w: item size %d exceeds %d bytes", ErrValidation, size, maxItemSize)
+	}
+	if depth > maxItemDepth {
+		return UpdateItemOutput{}, fmt.Errorf("%w: item nesting depth %d exceeds %d levels", ErrValidation, depth, maxItemDepth)
 	}
 	// GSI key validation on the post-write item (atomic rejection).
 	if err := validateGsiKeys(updated, def.GSIs); err != nil {
 		return UpdateItemOutput{}, err
 	}
 
-	dataID, err := c.store.PutItem(tx, in.TableName, hashVal, rangeVal, wire)
+	dataID, err := c.store.PutItem(tx, in.TableName, hashVal, rangeVal, wire, size)
 	if err != nil {
 		return UpdateItemOutput{}, err
 	}
-	if err := c.maintainGsiRows(tx, in.TableName, def.GSIs, dataID, updated); err != nil {
+	if err := c.maintainGsiRows(tx, in.TableName, def.GSIs, dataID, updated, size); err != nil {
 		return UpdateItemOutput{}, err
 	}
 	if err := tx.Commit(); err != nil {

@@ -4,9 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
-	"github.com/quells-bot/ddb-sqlite/internal/expr"
-	"github.com/quells-bot/ddb-sqlite/internal/storage"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/internal/expr"
+	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
 )
 
 // validateGsiKeys checks every present GSI key attribute on the post-write item
@@ -54,32 +54,75 @@ func validateOneGsiKey(item Item, name, keyType string) error {
 	return nil
 }
 
-// maintainGsiRows upserts GSI index rows for each GSI whose key attrs are all
-// present on the post-write item. Runs after the data write (which returned
-// dataID) so the ON DELETE CASCADE from the data-row REPLACE has already
-// cleaned old GSI rows. Items missing a GSI partition key are sparse (no row).
-func (c *Client) maintainGsiRows(tx *sql.Tx, table string, gsis []storage.GsiDef, dataID int64, item Item) error {
-	for _, g := range gsis {
-		hv, ok := item[g.Hash]
+// gsiKeyValue converts an attrval.Value to its storage key value iff it is a
+// valid scalar of the declared key type (non-empty for S/B). Returns an error
+// for a wrong tag, non-scalar, or empty S/B. This is the indexability predicate
+// applied per key attribute; the write path surfaces these failures via
+// validateGsiKeys (unchanged error messages), the backfill treats them as
+// "not indexable" (skip). Reuses keyValue for the actual conversion.
+func gsiKeyValue(v attrval.Value, keyType string) (any, error) {
+	wantTag := tagForKeyType(keyType)
+	if v.Tag() != wantTag {
+		return nil, fmt.Errorf("Type mismatch for Index Key")
+	}
+	switch v.Tag() {
+	case attrval.TagString:
+		if v.Str() == "" {
+			return nil, fmt.Errorf("The AttributeValue for a key attribute cannot contain an empty string value")
+		}
+	case attrval.TagBinary:
+		if len(v.Bin()) == 0 {
+			return nil, fmt.Errorf("The AttributeValue for a key attribute cannot contain an empty binary value")
+		}
+	}
+	return keyValue(v)
+}
+
+// gsiIndexKey returns the index key values for one GSI on an item, and whether
+// the item is indexable. An item is indexable iff every key attribute the GSI
+// declares is present and a valid scalar of the declared type (non-empty S/B).
+// For a composite GSI both key attrs must be present (hash present, range
+// absent → not indexed, probe-G20). Shared by write-time maintenance and the
+// UpdateTable backfill so both consume one code path.
+func gsiIndexKey(item Item, g storage.GsiDef) (hashVal, rangeVal any, indexable bool) {
+	hv, ok := item[g.Hash]
+	if !ok {
+		return nil, nil, false
+	}
+	h, err := gsiKeyValue(hv, g.HashType)
+	if err != nil {
+		return nil, nil, false
+	}
+	hashVal = h
+	if g.Range != "" {
+		rv, ok := item[g.Range]
 		if !ok {
-			continue // sparse: no partition key
+			return nil, nil, false
 		}
-		hashVal, err := keyValue(hv)
+		r, err := gsiKeyValue(rv, g.RangeType)
 		if err != nil {
-			return err
+			return nil, nil, false
 		}
-		var rangeVal any
-		if g.Range != "" {
-			rv, ok := item[g.Range]
-			if !ok {
-				continue // composite GSI, sort absent: not indexed (probe G20)
-			}
-			rangeVal, err = keyValue(rv)
-			if err != nil {
-				return err
-			}
+		rangeVal = r
+	}
+	return hashVal, rangeVal, true
+}
+
+// maintainGsiRows upserts GSI index rows for each GSI whose key attrs are all
+// present and valid on the post-write item. Runs after the data write (which
+// returned dataID) so the ON DELETE CASCADE from the data-row REPLACE has
+// already cleaned old GSI rows. Items that are not indexable (sparse, wrong
+// type, non-scalar, empty S/B, composite-missing-range) are skipped. The write
+// path runs validateGsiKeys before the storage write so a rejected write stays
+// atomic and surfaces AWS-shaped error messages; this function only indexes
+// items validateGsiKeys already accepted (indexable==true there).
+func (c *Client) maintainGsiRows(tx *sql.Tx, table string, gsis []storage.GsiDef, dataID int64, item Item, size int64) error {
+	for _, g := range gsis {
+		hv, rv, ok := gsiIndexKey(item, g)
+		if !ok {
+			continue
 		}
-		if err := c.store.UpsertGsiRow(tx, table, g.Name, dataID, hashVal, rangeVal); err != nil {
+		if err := c.store.UpsertGsiRow(tx, table, g.Name, dataID, hv, rv, size); err != nil {
 			return err
 		}
 	}

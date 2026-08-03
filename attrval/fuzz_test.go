@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite/internal/num"
+	"github.com/quells-bot/ddb-sqlite-core/internal/num"
 )
 
 // FuzzWireRoundTrip asserts any JSON that decodes to a Value round-trips
@@ -80,6 +80,58 @@ func FuzzSetDedup(f *testing.F) {
 		s2 := NewStringSet(s1.SS())
 		if !s1.Equal(s2) {
 			t.Fatalf("SS not idempotent: %v vs %v", s1.SS(), s2.SS())
+		}
+	})
+}
+
+// FuzzProject asserts Project never panics for arbitrary path lists over
+// arbitrary items, that the result's top-level attributes are always a
+// subset of the paths' root names, and that the receiver is unchanged
+// (M6c §9).
+func FuzzProject(f *testing.F) {
+	doc := `{"a":{"M":{"b":{"L":[{"S":"x"},{"M":{"c":{"N":"1"}}}]}}},` +
+		`"arr":{"L":[{"S":"p"},{"S":"q"},{"S":"r"}]},"s":{"S":"v"},"n":{"N":"3.14"}}`
+	for _, seed := range [][3]string{
+		{"a.b[1].c", "arr[1]", doc},
+		{"a", "missing.deep[9]", doc},
+		{"arr[0]", "arr[2]", doc},
+		{"s", "n", doc},
+		{"a.b[0]", "a.b[1]", doc},
+		{"", "[0]", doc},
+	} {
+		f.Add(seed[0], seed[1], seed[2])
+	}
+	f.Fuzz(func(t *testing.T, p1, p2, doc string) {
+		var m map[string]Value
+		if err := json.Unmarshal([]byte(doc), &m); err != nil {
+			return
+		}
+		var paths []Path
+		roots := map[string]bool{}
+		for _, ps := range []string{p1, p2} {
+			p, err := ParsePath(ps)
+			if err != nil {
+				continue
+			}
+			paths = append(paths, p)
+			roots[p[0].Name] = true
+		}
+		before, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("marshal item: %v", err)
+		}
+		out := Project(m, paths)
+		for name := range out {
+			if !roots[name] {
+				t.Fatalf("Project emitted %q, not a path root (paths %q, %q)", name, p1, p2)
+			}
+		}
+		after, err := json.Marshal(m)
+		if err != nil {
+			t.Fatalf("re-marshal item: %v", err)
+		}
+		if string(before) != string(after) {
+			t.Fatalf("Project mutated its receiver: %s -> %s", before, after)
 		}
 	})
 }

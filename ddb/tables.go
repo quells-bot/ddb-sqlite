@@ -2,12 +2,13 @@ package ddb
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/quells-bot/ddb-sqlite/internal/storage"
+	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
 )
 
 // KeySchemaElement names one key attribute as HASH or RANGE.
@@ -37,9 +38,12 @@ type GlobalSecondaryIndex struct {
 
 // GlobalSecondaryIndexDescription is DescribeTable's view of a GSI.
 type GlobalSecondaryIndexDescription struct {
-	IndexName  string
-	KeySchema  []KeySchemaElement
-	Projection Projection
+	IndexName      string
+	KeySchema      []KeySchemaElement
+	Projection     Projection
+	IndexStatus    string // always "ACTIVE" in this engine (synchronous add)
+	ItemCount      int64
+	IndexSizeBytes int64
 }
 
 // TableDescription is the engine's view of a table (GSIs/billing arrive later).
@@ -48,6 +52,8 @@ type TableDescription struct {
 	CreationTime                                time.Time
 	GlobalSecondaryIndexes                      []GlobalSecondaryIndexDescription
 	AttributeDefinitions                        []AttributeDefinition
+	ItemCount                                   int64
+	TableSizeBytes                              int64
 }
 
 // CreateTableInput carries the table name, key schema, and attribute defs.
@@ -61,6 +67,30 @@ type CreateTableInput struct {
 // DescribeTableInput names the table to describe.
 type DescribeTableInput struct {
 	TableName string
+}
+
+// GlobalSecondaryIndexUpdate is one action in an UpdateTable call. Exactly one
+// of Create or Delete must be non-nil (enforced by validation rule 4).
+type GlobalSecondaryIndexUpdate struct {
+	Create *GlobalSecondaryIndex // non-nil for a Create action
+	Delete *string               // non-nil GSI name for a Delete action
+}
+
+// UpdateTableInput carries a table name and at most one GSI create/delete action.
+// Non-GSI fields (billing mode, throughput, SSE, streams, replicas) have no
+// representation in core; the adapter sets NonGsiFieldsPresent so the engine can
+// distinguish a truly empty update (rejected, rule 2) from a throughput-only
+// no-op, and reject a GSI action combined with other operations (rule 5).
+type UpdateTableInput struct {
+	TableName                   string
+	AttributeDefinitions        []AttributeDefinition
+	GlobalSecondaryIndexUpdates []GlobalSecondaryIndexUpdate
+	NonGsiFieldsPresent         bool
+}
+
+// UpdateTableOutput carries the table description after the update.
+type UpdateTableOutput struct {
+	TableDescription TableDescription
 }
 
 func validKeyType(t string) bool { return t == "S" || t == "N" || t == "B" }
@@ -114,13 +144,20 @@ func (c *Client) CreateTable(ctx context.Context, in CreateTableInput) (TableDes
 			return TableDescription{}, err
 		}
 	}
+	td, err := c.describe(tx, in.TableName, def, now)
+	if err != nil {
+		return TableDescription{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return TableDescription{}, err
 	}
-	return describeFromDef(in.TableName, def, now), nil
+	return td, nil
 }
 
 func (c *Client) DescribeTable(ctx context.Context, in DescribeTableInput) (TableDescription, error) {
+	if err := validateTableName(in.TableName); err != nil {
+		return TableDescription{}, err
+	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return TableDescription{}, err
@@ -134,12 +171,15 @@ func (c *Client) DescribeTable(ctx context.Context, in DescribeTableInput) (Tabl
 	if err != nil {
 		return TableDescription{}, err
 	}
-	return describeFromDef(in.TableName, def, creationTimeFromMeta(def.Meta)), nil
+	return c.describe(tx, in.TableName, def, creationTimeFromMeta(def.Meta))
 }
 
 func analyzeCreateTable(in CreateTableInput) (hashName, hashType, rangeName, rangeType string, gsis []storage.GsiDef, err error) {
-	if in.TableName == "" {
-		return "", "", "", "", nil, fmt.Errorf("%w: table name is empty", ErrValidation)
+	if err := validateTableName(in.TableName); err != nil {
+		return "", "", "", "", nil, err
+	}
+	if !validName(in.TableName) {
+		return "", "", "", "", nil, fmt.Errorf("%w: invalid table name %q: must be 3-255 chars of [a-zA-Z0-9_.-]", ErrValidation, in.TableName)
 	}
 	if len(in.KeySchema) > 2 {
 		return "", "", "", "", nil, fmt.Errorf("%w: key schema must have at most two elements", ErrValidation)
@@ -203,12 +243,13 @@ func analyzeCreateTable(in CreateTableInput) (hashName, hashType, rangeName, ran
 	}
 
 	// Validate GSIs.
+	projSum := 0
 	gsiNames := map[string]bool{}
 	if len(in.GlobalSecondaryIndexes) > 20 {
 		return "", "", "", "", nil, fmt.Errorf("%w: at most 20 global secondary indexes per table", ErrValidation)
 	}
 	for _, g := range in.GlobalSecondaryIndexes {
-		if !validGsiName(g.IndexName) {
+		if !validName(g.IndexName) {
 			return "", "", "", "", nil, fmt.Errorf("%w: invalid index name %q: must be 3-255 chars of [a-zA-Z0-9_.-]", ErrValidation, g.IndexName)
 		}
 		if gsiNames[g.IndexName] {
@@ -220,9 +261,22 @@ func analyzeCreateTable(in CreateTableInput) (hashName, hashType, rangeName, ran
 		if gerr != nil {
 			return "", "", "", "", nil, gerr
 		}
+		if err := validateIndexAttrName(gh); err != nil {
+			return "", "", "", "", nil, err
+		}
+		if gr != "" {
+			if err := validateIndexAttrName(gr); err != nil {
+				return "", "", "", "", nil, err
+			}
+		}
 
 		if err := validateProjection(g.Projection, gh, gr, hashName, rangeName); err != nil {
 			return "", "", "", "", nil, err
+		}
+
+		projSum += len(g.Projection.NonKeyAttributes)
+		if projSum > maxProjectedAttrsPerTable {
+			return "", "", "", "", nil, fmt.Errorf("%w: total projected attributes across all secondary indexes exceeds %d", ErrValidation, maxProjectedAttrsPerTable)
 		}
 
 		gsis = append(gsis, storage.GsiDef{
@@ -247,8 +301,17 @@ func analyzeCreateTable(in CreateTableInput) (hashName, hashType, rangeName, ran
 	return hashName, hashType, rangeName, rangeType, gsis, nil
 }
 
-// validGsiName checks 3–255 chars from [a-zA-Z0-9_.-].
-func validGsiName(name string) bool {
+// maxProjectedAttrsPerTable caps the total user-specified projected
+// attributes (INCLUDE NonKeyAttributes) across all of a table's GSIs
+// (P-names: key attributes do not count; KEYS_ONLY/ALL carry none).
+// dynamodb-local's error text for this limit is misleading ("No more than
+// 20 attributes ... Local Secondary Indices") — the engine uses a correct
+// message (spec §11).
+const maxProjectedAttrsPerTable = 100
+
+// validName checks 3–255 chars from [a-zA-Z0-9_.-] — the rule for both table
+// names (P-names, M6c W3) and index names (M4 probe G27).
+func validName(name string) bool {
 	if len(name) < 3 || len(name) > 255 {
 		return false
 	}
@@ -260,6 +323,28 @@ func validGsiName(name string) bool {
 		}
 	}
 	return true
+}
+
+// validateTableName rejects an empty table name. P-names confirmed the
+// reference returns ValidationException for "" on all 12 table-taking
+// operations (nil TableName is caught SDK-side). Called at the top of every
+// public op — before BeginTx, since no storage access is needed — and per
+// table entry in the batch ops' request maps.
+func validateTableName(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: table name is empty", ErrValidation)
+	}
+	return nil
+}
+
+// validateIndexAttrName enforces the 1–255 byte limit on GSI key attribute
+// names and INCLUDE NonKeyAttributes names (P-names; reference message
+// "must be between 1 and 255 characters, inclusive").
+func validateIndexAttrName(name string) error {
+	if len(name) < 1 || len(name) > 255 {
+		return fmt.Errorf("%w: attribute name must be between 1 and 255 characters, inclusive; got %d bytes", ErrValidation, len(name))
+	}
+	return nil
 }
 
 // validateGsiKeySchema checks exactly 1 HASH + 0-1 RANGE, each with a definition,
@@ -334,6 +419,9 @@ func validateProjection(p Projection, gsiHash, gsiRange, tblHash, tblRange strin
 		}
 		seen := map[string]bool{}
 		for _, a := range p.NonKeyAttributes {
+			if err := validateIndexAttrName(a); err != nil {
+				return err
+			}
 			if keySet[a] {
 				return fmt.Errorf("%w: INCLUDE NonKeyAttributes must not include key attribute %q", ErrValidation, a)
 			}
@@ -364,9 +452,10 @@ func describeFromDef(name string, def storage.TableDef, created time.Time) Table
 			ks = append(ks, KeySchemaElement{AttributeName: g.Range, KeyType: "RANGE"})
 		}
 		td.GlobalSecondaryIndexes = append(td.GlobalSecondaryIndexes, GlobalSecondaryIndexDescription{
-			IndexName:  g.Name,
-			KeySchema:  ks,
-			Projection: Projection{Type: g.ProjectionType, NonKeyAttributes: g.Projected},
+			IndexName:   g.Name,
+			KeySchema:   ks,
+			Projection:  Projection{Type: g.ProjectionType, NonKeyAttributes: g.Projected},
+			IndexStatus: "ACTIVE",
 		})
 	}
 	td.AttributeDefinitions = append(td.AttributeDefinitions, AttributeDefinition{AttributeName: def.Hash, AttributeType: def.HashType})
@@ -388,6 +477,40 @@ func describeFromDef(name string, def storage.TableDef, created time.Time) Table
 		}
 	}
 	return td
+}
+
+// describe builds the static table description (describeFromDef) then fills in
+// real ItemCount/TableSizeBytes and per-GSI ItemCount/IndexSizeBytes by
+// querying the data and GSI tables on tx. dynamodb-local reports these
+// immediately and exactly (P-desc); the sizes are the W1 item-accounting sum
+// stored at write time, not wire-blob bytes. Called by DescribeTable,
+// CreateTable, and UpdateTable so every description path reports real stats.
+func (c *Client) describe(tx *sql.Tx, name string, def storage.TableDef, created time.Time) (TableDescription, error) {
+	td := describeFromDef(name, def, created)
+	if err := c.fillTableStats(tx, &td); err != nil {
+		return TableDescription{}, err
+	}
+	return td, nil
+}
+
+// fillTableStats queries the data table (ItemCount/TableSizeBytes) and each
+// GSI table (ItemCount/IndexSizeBytes) and writes the results into td.
+func (c *Client) fillTableStats(tx *sql.Tx, td *TableDescription) error {
+	count, size, err := c.store.TableStats(tx, td.Name)
+	if err != nil {
+		return err
+	}
+	td.ItemCount = count
+	td.TableSizeBytes = size
+	for i := range td.GlobalSecondaryIndexes {
+		gc, gs, err := c.store.GsiStats(tx, td.Name, td.GlobalSecondaryIndexes[i].IndexName)
+		if err != nil {
+			return err
+		}
+		td.GlobalSecondaryIndexes[i].ItemCount = gc
+		td.GlobalSecondaryIndexes[i].IndexSizeBytes = gs
+	}
+	return nil
 }
 
 func creationTimeFromMeta(meta []byte) time.Time {
@@ -456,6 +579,9 @@ func (c *Client) ListTables(ctx context.Context, in ListTablesInput) (ListTables
 }
 
 func (c *Client) DeleteTable(ctx context.Context, in DeleteTableInput) error {
+	if err := validateTableName(in.TableName); err != nil {
+		return err
+	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return err
