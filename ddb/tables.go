@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/quells-bot/ddb-sqlite/internal/storage"
+	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
 )
 
 // KeySchemaElement names one key attribute as HASH or RANGE.

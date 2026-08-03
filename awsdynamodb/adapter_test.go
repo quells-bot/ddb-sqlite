@@ -10,7 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
 
-	"github.com/quells-bot/ddb-sqlite/awsdynamodb"
+	"github.com/quells-bot/ddb-sqlite-core/awsdynamodb"
 )
 
 func TestOpenClose(t *testing.T) {

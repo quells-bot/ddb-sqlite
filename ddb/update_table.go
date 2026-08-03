@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/quells-bot/ddb-sqlite/internal/storage"
+	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
 )
 
 // validateUpdateTableShape enforces request-shape rules 2–6 (rule 1, table

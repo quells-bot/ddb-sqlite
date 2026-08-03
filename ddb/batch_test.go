@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
 )
 
 func TestBatchWriteItemMultiTable(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
 )
 
 // Eval evaluates the bound condition against one item. A nil item makes every

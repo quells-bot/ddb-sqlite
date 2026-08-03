@@ -19,7 +19,7 @@ M1 delivers:
 ## 2. Package layout & module structure
 
 ```
-ddb-sqlite/                         # module github.com/quells-bot/ddb-sqlite (SDK-free)
+ddb-sqlite/                         # module github.com/quells-bot/ddb-sqlite-core (SDK-free)
 ├─ go.mod                           # adds modernc.org/sqlite in M1
 ├─ attrval/                         # (done in M0) Value, wire, sets, paths
 ├─ internal/
@@ -44,8 +44,8 @@ ddb-sqlite/                         # module github.com/quells-bot/ddb-sqlite (S
 
 ### Two Go modules in the repo
 
-1. **Root module** (`github.com/quells-bot/ddb-sqlite`) — SDK-free. Adds `modernc.org/sqlite` as its only new dependency. Houses `attrval`, `internal/num`, `internal/storage`, and `ddb`.
-2. **`awsdynamodb/` module** (`github.com/quells-bot/ddb-sqlite/awsdynamodb`) — its own `go.mod` that `require`s the AWS SDK v2 (`github.com/aws/aws-sdk-go-v2/service/dynamodb` + `types`) and `require`s + `replace`s the root module to `..`. The SDK dependency is isolated here; the root never imports it.
+1. **Root module** (`github.com/quells-bot/ddb-sqlite-core`) — SDK-free. Adds `modernc.org/sqlite` as its only new dependency. Houses `attrval`, `internal/num`, `internal/storage`, and `ddb`.
+2. **`awsdynamodb/` module** (`github.com/quells-bot/ddb-sqlite-core/awsdynamodb`) — its own `go.mod` that `require`s the AWS SDK v2 (`github.com/aws/aws-sdk-go-v2/service/dynamodb` + `types`) and `require`s + `replace`s the root module to `..`. The SDK dependency is isolated here; the root never imports it.
 
 ### Dependency direction
 
@@ -271,13 +271,13 @@ The adapter is a separate Go module that depends on the AWS SDK v2 and implement
 ### Module wiring (`awsdynamodb/go.mod`)
 
 ```go
-module github.com/quells-bot/ddb-sqlite/awsdynamodb
+module github.com/quells-bot/ddb-sqlite-core/awsdynamodb
 
 require (
     github.com/aws/aws-sdk-go-v2/service/dynamodb <ver>
-    github.com/quells-bot/ddb-sqlite <pseudo-ver>
+    github.com/quells-bot/ddb-sqlite-core <pseudo-ver>
 )
-replace github.com/quells-bot/ddb-sqlite => ..
+replace github.com/quells-bot/ddb-sqlite-core => ..
 ```
 
 The root module stays SDK-free; the SDK is pulled only here.

@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
-	"github.com/quells-bot/ddb-sqlite/internal/expr"
-	"github.com/quells-bot/ddb-sqlite/internal/storage"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/internal/expr"
+	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
 )
 
 // UpdateItemInput carries the key to update, the update and condition

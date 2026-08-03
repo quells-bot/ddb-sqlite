@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
 )
 
 // newUpdateTable opens a client with a single-key table "T" and returns both.

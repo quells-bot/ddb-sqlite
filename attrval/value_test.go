@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite/internal/num"
+	"github.com/quells-bot/ddb-sqlite-core/internal/num"
 )
 
 func TestScalars(t *testing.T) {

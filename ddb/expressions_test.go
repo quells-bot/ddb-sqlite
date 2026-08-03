@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
-	"github.com/quells-bot/ddb-sqlite/internal/expr"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/internal/expr"
 )
 
 func TestPrepareCondition(t *testing.T) {

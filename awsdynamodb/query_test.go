@@ -9,7 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
-	"github.com/quells-bot/ddb-sqlite/awsdynamodb"
+	"github.com/quells-bot/ddb-sqlite-core/awsdynamodb"
 )
 
 // createCompositeTable creates a table with a composite (pk HASH S, sk RANGE N)

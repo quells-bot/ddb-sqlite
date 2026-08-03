@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/quells-bot/ddb-sqlite/internal/num"
+	"github.com/quells-bot/ddb-sqlite-core/internal/num"
 )
 
 // MarshalJSON encodes the Value as DynamoDB wire JSON: a single-key object

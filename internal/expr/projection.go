@@ -3,7 +3,7 @@ package expr
 import (
 	"fmt"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
 )
 
 // Projection is a parsed projection expression: a comma-separated list of

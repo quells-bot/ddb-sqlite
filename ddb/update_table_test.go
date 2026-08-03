@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
-	"github.com/quells-bot/ddb-sqlite/internal/storage"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
 )
 
 // newEmptyTable creates a table "T" with pk HASH S, sk RANGE S and no GSIs —

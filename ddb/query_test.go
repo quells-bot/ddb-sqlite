@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
 )
 
 func TestValidateSelect(t *testing.T) {
@@ -22,21 +22,21 @@ func TestValidateSelect(t *testing.T) {
 		{"", "KEYS_ONLY", false, "ALL_PROJECTED_ATTRIBUTES", false},
 		{"", "INCLUDE", false, "ALL_PROJECTED_ATTRIBUTES", false},
 		{"", "ALL", false, "ALL_ATTRIBUTES", false},
-		{"", "", true, "ALL_ATTRIBUTES", false},              // projection governs
-		{"", "KEYS_ONLY", true, "ALL_ATTRIBUTES", false},     // projection governs on GSI too
+		{"", "", true, "ALL_ATTRIBUTES", false},          // projection governs
+		{"", "KEYS_ONLY", true, "ALL_ATTRIBUTES", false}, // projection governs on GSI too
 		{"ALL_ATTRIBUTES", "", false, "ALL_ATTRIBUTES", false},
-		{"ALL_ATTRIBUTES", "KEYS_ONLY", false, "", true},     // non-ALL GSI -> err
-		{"ALL_ATTRIBUTES", "KEYS_ONLY", true, "", true},      // + projection -> err
+		{"ALL_ATTRIBUTES", "KEYS_ONLY", false, "", true}, // non-ALL GSI -> err
+		{"ALL_ATTRIBUTES", "KEYS_ONLY", true, "", true},  // + projection -> err
 		{"ALL_ATTRIBUTES", "ALL", false, "ALL_ATTRIBUTES", false},
-		{"ALL_PROJECTED_ATTRIBUTES", "", false, "", true},    // base table -> err
+		{"ALL_PROJECTED_ATTRIBUTES", "", false, "", true}, // base table -> err
 		{"ALL_PROJECTED_ATTRIBUTES", "KEYS_ONLY", false, "ALL_PROJECTED_ATTRIBUTES", false},
 		{"ALL_PROJECTED_ATTRIBUTES", "KEYS_ONLY", true, "", true}, // + projection -> err
 		{"ALL_PROJECTED_ATTRIBUTES", "ALL", false, "ALL_PROJECTED_ATTRIBUTES", false},
 		{"COUNT", "", false, "COUNT", false},
-		{"COUNT", "", true, "", true},                        // + projection -> err
-		{"SPECIFIC_ATTRIBUTES", "", false, "", true},         // needs projection
+		{"COUNT", "", true, "", true},                // + projection -> err
+		{"SPECIFIC_ATTRIBUTES", "", false, "", true}, // needs projection
 		{"SPECIFIC_ATTRIBUTES", "", true, "SPECIFIC_ATTRIBUTES", false},
-		{"count", "", false, "", true},                       // case-sensitive
+		{"count", "", false, "", true}, // case-sensitive
 	}
 	for _, tc := range cases {
 		t.Run(tc.in+"/"+tc.gsiProj, func(t *testing.T) {
@@ -502,8 +502,8 @@ func TestQueryProjection(t *testing.T) {
 	createQueryTable(t, c, ctx, 5) // partition p1, sk 0..4, val "v<sk>"
 
 	out, err := c.Query(ctx, QueryInput{
-		TableName:                 "T",
-		KeyConditionExpression:    "pk = :pk",
+		TableName:              "T",
+		KeyConditionExpression: "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{
 			":pk": attrval.NewString("p1"),
 		},
@@ -554,8 +554,8 @@ func TestQuerySelectProjectionInteraction(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
 	createQueryTable(t, c, ctx, 3)
 	base := QueryInput{
-		TableName:                 "T",
-		KeyConditionExpression:    "pk = :pk",
+		TableName:              "T",
+		KeyConditionExpression: "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{
 			":pk": attrval.NewString("p1"),
 		},
@@ -620,8 +620,8 @@ func TestQueryGsiProjectionRestriction(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
 	// pk HASH S; GSI gkeys KEYS_ONLY on gsi_pk; GSI gincl INCLUDE [proj1] on gsi_pk.
 	if _, err := c.CreateTable(ctx, CreateTableInput{
-		TableName:            "T",
-		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
+		TableName: "T",
+		KeySchema: []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
 		AttributeDefinitions: []AttributeDefinition{
 			{AttributeName: "pk", AttributeType: "S"},
 			{AttributeName: "gsi_pk", AttributeType: "S"},
@@ -682,8 +682,8 @@ func TestQueryGsiProjectionRestriction(t *testing.T) {
 	// ALL-projected GSI (no restriction) is covered by the adapter
 	// conformance suite; here verify base-table Query is unrestricted.
 	if _, err := c.Query(ctx, QueryInput{
-		TableName:                 "T",
-		KeyConditionExpression:    "pk = :pk",
+		TableName:              "T",
+		KeyConditionExpression: "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{
 			":pk": attrval.NewString("A"),
 		},
@@ -699,9 +699,9 @@ func TestQueryGsiProjectionRestriction(t *testing.T) {
 
 	// ALL_PROJECTED_ATTRIBUTES + projection on a GSI -> ErrValidation.
 	if _, err := c.Query(ctx, QueryInput{
-		TableName:                 "T",
-		IndexName:                 "gincl",
-		KeyConditionExpression:    "gsi_pk = :g",
+		TableName:              "T",
+		IndexName:              "gincl",
+		KeyConditionExpression: "gsi_pk = :g",
 		ExpressionAttributeValues: map[string]attrval.Value{
 			":g": attrval.NewString("G1"),
 		},

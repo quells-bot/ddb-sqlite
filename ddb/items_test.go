@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
-	"github.com/quells-bot/ddb-sqlite/internal/num"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/internal/num"
 )
 
 func allTypesItem() Item {
@@ -444,7 +444,6 @@ func TestDeleteItemReturnValuesAllOld(t *testing.T) {
 		t.Errorf("Attributes = %v, want empty", out.Attributes)
 	}
 }
-
 
 func TestGetItemProjection(t *testing.T) {
 	c, ctx := newClient(t), context.Background()

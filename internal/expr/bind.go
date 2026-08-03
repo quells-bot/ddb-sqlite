@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
 )
 
 // Env carries the request's substitution maps. Keys include their sigil, as the

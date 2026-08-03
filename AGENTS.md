@@ -40,7 +40,7 @@ num.Decimal ──┐
 ## Key Directories
 
 ```
-ddb-sqlite/                      # module github.com/quells-bot/ddb-sqlite (SDK-free, go 1.25)
+ddb-sqlite/                      # module github.com/quells-bot/ddb-sqlite-core (SDK-free, go 1.25)
 ├── go.mod / go.sum
 ├── IDEA.md                      # design overview / intent
 ├── ddb/                         # IMPORTABLE engine: Client, table ops, item ops, exported errors
@@ -77,7 +77,7 @@ ddb-sqlite/                      # module github.com/quells-bot/ddb-sqlite (SDK-
 │       ├── reserved.go          # reserved words
 │       └── *_test.go            # lex/parse/bind/eval unit + fuzz tests
 ├── awsdynamodb/                 # SEPARATE MODULE (go 1.26.5) — depends on AWS SDK v2
-│   ├── go.mod                   # replace github.com/quells-bot/ddb-sqlite => ..
+│   ├── go.mod                   # replace github.com/quells-bot/ddb-sqlite-core => ..
 │   ├── adapter.go               # Adapter implements SDK DynamoDBAPI subset; mapError → SDK exceptions
 │   ├── marshal.go               # FromSDK/ToSDK AttributeValue ↔ attrval.Value, FromSDKMap/ToSDKMap
 │   ├── conformance_test.go      # parameterized conformance harness (adapter + dynamodb-local)
@@ -119,8 +119,8 @@ go mod tidy && (cd awsdynamodb && go mod tidy)
 ```
 
 Two Go modules must be built/tested independently:
-- Root: `github.com/quells-bot/ddb-sqlite` (go 1.25, no AWS SDK)
-- Adapter: `github.com/quells-bot/ddb-sqlite/awsdynamodb` (go 1.26.5, AWS SDK v2 + `ory/dockertest` for the dynamodb-local target; uses a `replace` directive pointing the root module at `..`)
+- Root: `github.com/quells-bot/ddb-sqlite-core` (go 1.25, no AWS SDK)
+- Adapter: `github.com/quells-bot/ddb-sqlite-core/awsdynamodb` (go 1.26.5, AWS SDK v2 + `ory/dockertest` for the dynamodb-local target; uses a `replace` directive pointing the root module at `..`)
 
 ## Code Conventions & Common Patterns
 
@@ -163,7 +163,7 @@ Two Go modules must be built/tested independently:
 - **Go toolchain**: root module `go 1.25`; adapter module `go 1.26.5`. Both must build.
 - **SQLite driver**: `modernc.org/sqlite` (CGO-free), imported for side-effect registration in `internal/storage/store.go`. **`CGO_ENABLED=0` is the intent** — do not introduce CGO deps.
 - **No AWS SDK in the root module.** The SDK (`aws-sdk-go-v2`) lives only in `awsdynamodb/go.mod`. If adding a package that needs SDK types, it belongs in `awsdynamodb/`, not the root.
-- **Two modules**: run `go` commands in the right directory. The adapter module uses `replace github.com/quells-bot/ddb-sqlite => ..`.
+- **Two modules**: run `go` commands in the right directory. The adapter module uses `replace github.com/quells-bot/ddb-sqlite-core => ..`.
 - **dynamodb-local via podman**: the conformance suite's local target expects a rootless podman socket (`systemctl --user start podman.socket`); `DOCKER_HOST` is auto-set to the podman socket if unset. Image `amazon/dynamodb-local:3.3.1`. Falls back to `DDBSQLITE_CONF_LOCAL_ENDPOINT`.
 - **No package manager / no Bun / no Node.** Pure Go project.
 

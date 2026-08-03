@@ -20,7 +20,7 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/ory/dockertest/v4"
 
-	"github.com/quells-bot/ddb-sqlite/awsdynamodb"
+	"github.com/quells-bot/ddb-sqlite-core/awsdynamodb"
 )
 
 // api is the minimal interface (exact SDK method signatures) both *dynamodb.Client
@@ -5706,7 +5706,6 @@ func TestAdapterUpdateTableStrayAttributeDefinitions(t *testing.T) {
 	})
 	asValidation(t, err, "stray AttributeDefinitions with no GSI action")
 }
-
 
 // --- M6B: projection helpers ---
 

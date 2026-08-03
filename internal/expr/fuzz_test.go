@@ -3,7 +3,7 @@ package expr
 import (
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite-core/attrval"
 )
 
 // FuzzParseCondition asserts the parser never panics: arbitrary input must

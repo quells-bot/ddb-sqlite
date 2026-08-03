@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-31
 **Status:** Approved (brainstorming) → pending implementation plan
-**Module (today):** `github.com/quells-bot/ddb-sqlite` (single Go module; adapter splits to its own module before public release)
+**Module (today):** `github.com/quells-bot/ddb-sqlite-core` (single Go module; adapter splits to its own module before public release)
 
 ## 1. Overview & Goals
 
@@ -30,7 +30,7 @@ Non-goals (explicitly out of scope for v1):
 ## 2. Architecture: core / adapter split
 
 ```
-ddb-sqlite/                      # module github.com/quells-bot/ddb-sqlite  (SDK-free)
+ddb-sqlite/                      # module github.com/quells-bot/ddb-sqlite-core  (SDK-free)
 ├─ go.mod
 ├─ attrval/                       # IMPORTABLE: DynamoDB typed-value model + wire encode/decode
 ├─ ddb/                           # IMPORTABLE: the engine (Client, operations, exported errors)

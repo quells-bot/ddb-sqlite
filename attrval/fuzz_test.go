@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite/internal/num"
+	"github.com/quells-bot/ddb-sqlite-core/internal/num"
 )
 
 // FuzzWireRoundTrip asserts any JSON that decodes to a Value round-trips
