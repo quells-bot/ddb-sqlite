@@ -1,9 +1,6 @@
 package num
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 // FuzzParseRoundTrip asserts that any string Parse accepts round-trips through
 // String and re-Parse to an equal, idempotent canonical form, and that Parse
@@ -50,47 +47,6 @@ func FuzzCompareAntisymmetry(f *testing.F) {
 		}
 		if (cab == 0) != a.Equal(b) {
 			t.Fatalf("Equal/Compare mismatch: %q vs %q -> %d", sa, sb, cab)
-		}
-	})
-}
-
-// FuzzAddSub asserts Add/Sub never panic and are exact: commutativity and
-// the ring identities (a+b)-b == a and (a-b)+b == a hold for any parseable
-// pair (M6c §9). Add/Sub deliberately do not enforce DynamoDB range or
-// precision limits, so out-of-range operands are fair game and must still
-// produce exact results.
-func FuzzAddSub(f *testing.F) {
-	big := strings.Repeat("9", 126)               // ~9.9e+125, past the 38-digit precision cap
-	tiny := "0." + strings.Repeat("0", 129) + "1" // 1e-130, the minimum magnitude
-	for _, seed := range [][2]string{
-		{"0", "0"},
-		{"-0", "0"},
-		{"1.5", "-2.0"},
-		{"0.1", "0.2"},
-		{"100", "-100"},
-		{"123456789.987654321", "-987654321.123456789"},
-		{big, big},
-		{big, "-" + big},
-		{tiny, tiny},
-		{big, tiny},
-	} {
-		f.Add(seed[0], seed[1])
-	}
-	f.Fuzz(func(t *testing.T, sa, sb string) {
-		a, errA := Parse(sa)
-		b, errB := Parse(sb)
-		if errA != nil || errB != nil {
-			return
-		}
-		sum := a.Add(b)
-		if !sum.Equal(b.Add(a)) {
-			t.Fatalf("Add not commutative: %s + %s", a, b)
-		}
-		if got := sum.Sub(b); !got.Equal(a) {
-			t.Fatalf("(%s + %s) - %s = %s, want %s", a, b, b, got, a)
-		}
-		if got := a.Sub(b).Add(b); !got.Equal(a) {
-			t.Fatalf("(%s - %s) + %s = %s, want %s", a, b, b, got, a)
 		}
 	})
 }

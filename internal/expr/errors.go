@@ -15,5 +15,4 @@ var (
 	ErrUndefined = errors.New("expr: undefined substitution")
 	ErrUnused    = errors.New("expr: unused substitution")
 	ErrSemantic  = errors.New("expr: semantic error")
-	ErrLimit     = errors.New("expr: expression limit exceeded")
 )

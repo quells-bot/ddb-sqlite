@@ -4,9 +4,9 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/quells-bot/ddb-sqlite-core/attrval"
-	"github.com/quells-bot/ddb-sqlite-core/internal/expr"
-	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
+	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite/internal/expr"
+	"github.com/quells-bot/ddb-sqlite/internal/storage"
 )
 
 // validateGsiKeys checks every present GSI key attribute on the post-write item
@@ -116,13 +116,13 @@ func gsiIndexKey(item Item, g storage.GsiDef) (hashVal, rangeVal any, indexable 
 // path runs validateGsiKeys before the storage write so a rejected write stays
 // atomic and surfaces AWS-shaped error messages; this function only indexes
 // items validateGsiKeys already accepted (indexable==true there).
-func (c *Client) maintainGsiRows(tx *sql.Tx, table string, gsis []storage.GsiDef, dataID int64, item Item, size int64) error {
+func (c *Client) maintainGsiRows(tx *sql.Tx, table string, gsis []storage.GsiDef, dataID int64, item Item) error {
 	for _, g := range gsis {
 		hv, rv, ok := gsiIndexKey(item, g)
 		if !ok {
 			continue
 		}
-		if err := c.store.UpsertGsiRow(tx, table, g.Name, dataID, hv, rv, size); err != nil {
+		if err := c.store.UpsertGsiRow(tx, table, g.Name, dataID, hv, rv); err != nil {
 			return err
 		}
 	}

@@ -43,7 +43,7 @@ func (s *Store) CreateDataTable(tx *sql.Tx, def TableDef) error {
 		}
 		fmt.Fprintf(&b, `, range %s NOT NULL`, rt)
 	}
-	b.WriteString(`, data BLOB NOT NULL, size INTEGER NOT NULL`)
+	b.WriteString(`, data BLOB NOT NULL`)
 	if def.Range != "" {
 		b.WriteString(`, UNIQUE (hash, range)`)
 	} else {
@@ -68,14 +68,14 @@ func (s *Store) DropDataTable(tx *sql.Tx, name string) error {
 // iff the table has no sort key (guaranteed by ddb validation). It returns the
 // rowid of the inserted/replaced row (LastInsertId), which callers use as the
 // item's data id when maintaining GSI index rows.
-func (s *Store) PutItem(tx *sql.Tx, table string, hashVal, rangeVal any, data []byte, size int64) (int64, error) {
+func (s *Store) PutItem(tx *sql.Tx, table string, hashVal, rangeVal any, data []byte) (int64, error) {
 	tbl := TableName(table)
 	var res sql.Result
 	var err error
 	if rangeVal == nil {
-		res, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (hash, data, size) VALUES (?, ?, ?)`, hashVal, data, size)
+		res, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (hash, data) VALUES (?, ?)`, hashVal, data)
 	} else {
-		res, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (hash, range, data, size) VALUES (?, ?, ?, ?)`, hashVal, rangeVal, data, size)
+		res, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (hash, range, data) VALUES (?, ?, ?)`, hashVal, rangeVal, data)
 	}
 	if err != nil {
 		return 0, fmt.Errorf("storage: put item %q: %w", table, err)
@@ -108,7 +108,7 @@ func (s *Store) CreateGsiTable(tx *sql.Tx, tableDef TableDef, gsi GsiDef) error 
 		}
 		fmt.Fprintf(&b, `, range %s NOT NULL`, rt)
 	}
-	b.WriteString(`, size INTEGER NOT NULL) STRICT`)
+	b.WriteString(`) STRICT`)
 	if _, err := tx.Exec(b.String()); err != nil {
 		return fmt.Errorf("storage: create gsi table %q/%q: %w", tableDef.Name, gsi.Name, err)
 	}
@@ -131,13 +131,13 @@ func (s *Store) CreateGsiTable(tx *sql.Tx, tableDef TableDef, gsi GsiDef) error 
 // projected index key. Because data_id is the PRIMARY KEY, re-upserting the
 // same item updates its index key values in place (rangeVal is nil for a GSI
 // with no sort key).
-func (s *Store) UpsertGsiRow(tx *sql.Tx, table, gsi string, dataID int64, hashVal, rangeVal any, size int64) error {
+func (s *Store) UpsertGsiRow(tx *sql.Tx, table, gsi string, dataID int64, hashVal, rangeVal any) error {
 	tbl := GsiTableName(table, gsi)
 	var err error
 	if rangeVal == nil {
-		_, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (data_id, hash, size) VALUES (?, ?, ?)`, dataID, hashVal, size)
+		_, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (data_id, hash) VALUES (?, ?)`, dataID, hashVal)
 	} else {
-		_, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (data_id, hash, range, size) VALUES (?, ?, ?, ?)`, dataID, hashVal, rangeVal, size)
+		_, err = tx.Exec(`INSERT OR REPLACE INTO `+tbl+` (data_id, hash, range) VALUES (?, ?, ?)`, dataID, hashVal, rangeVal)
 	}
 	if err != nil {
 		return fmt.Errorf("storage: upsert gsi row %q/%q: %w", table, gsi, err)
@@ -186,32 +186,6 @@ func (s *Store) DeleteItem(tx *sql.Tx, table string, hashVal, rangeVal any) (fou
 	}
 	n, _ := res.RowsAffected()
 	return n > 0, nil
-}
-
-// TableStats returns the item count and the total stored item size (the W1
-// accounting bytes the caller supplied at write time) for a table's data
-// table. Storage stores the size; it does not compute W1 accounting. An empty
-// table reports (0, 0) — COALESCE maps a NULL SUM to 0.
-func (s *Store) TableStats(tx *sql.Tx, table string) (count, sizeBytes int64, err error) {
-	tbl := TableName(table)
-	err = tx.QueryRow(`SELECT COUNT(*), COALESCE(SUM(size), 0) FROM ` + tbl).Scan(&count, &sizeBytes)
-	if err != nil {
-		return 0, 0, fmt.Errorf("storage: table stats %q: %w", table, err)
-	}
-	return count, sizeBytes, nil
-}
-
-// GsiStats returns the indexed-item count and the total indexed-item size for
-// one GSI's index table. Each GSI row carries the item's full W1 size at
-// index-maintenance time, so IndexSizeBytes is the full-item W1 sum over
-// indexed items, regardless of the index's projection (P-desc).
-func (s *Store) GsiStats(tx *sql.Tx, table, gsi string) (count, sizeBytes int64, err error) {
-	tbl := GsiTableName(table, gsi)
-	err = tx.QueryRow(`SELECT COUNT(*), COALESCE(SUM(size), 0) FROM ` + tbl).Scan(&count, &sizeBytes)
-	if err != nil {
-		return 0, 0, fmt.Errorf("storage: gsi stats %q/%q: %w", table, gsi, err)
-	}
-	return count, sizeBytes, nil
 }
 
 // ExpireExpired scans all rows in the table's data table, calls expired(data)

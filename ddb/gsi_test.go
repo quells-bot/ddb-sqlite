@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite-core/attrval"
-	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
+	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite/internal/storage"
 )
 
 func newGsiClient(t *testing.T) *Client {
@@ -14,7 +14,7 @@ func newGsiClient(t *testing.T) *Client {
 	c := newClient(t)
 	ctx := context.Background()
 	_, err := c.CreateTable(ctx, CreateTableInput{
-		TableName: "Tbl",
+		TableName: "T",
 		KeySchema: []KeySchemaElement{
 			{AttributeName: "pk", KeyType: "HASH"},
 			{AttributeName: "sk", KeyType: "RANGE"},
@@ -47,7 +47,7 @@ func TestPutItemGSIKeyTypeMismatch(t *testing.T) {
 	ctx := context.Background()
 	// gsi_pk declared S; writing a Number -> ErrValidation, atomic (no data row).
 	_, err := c.PutItem(ctx, PutItemInput{
-		TableName: "Tbl",
+		TableName: "T",
 		Item: Item{
 			"pk":     attrval.NewString("A"),
 			"sk":     attrval.NewString("a"),
@@ -59,7 +59,7 @@ func TestPutItemGSIKeyTypeMismatch(t *testing.T) {
 		t.Fatalf("err = %v, want ErrValidation", err)
 	}
 	// Atomic: GetItem finds nothing.
-	got, _ := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{
+	got, _ := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{
 		"pk": attrval.NewString("A"), "sk": attrval.NewString("a"),
 	}})
 	if len(got.Item) != 0 {
@@ -71,7 +71,7 @@ func TestPutItemGSINonScalarKey(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
 	_, err := c.PutItem(ctx, PutItemInput{
-		TableName: "Tbl",
+		TableName: "T",
 		Item: Item{
 			"pk":     attrval.NewString("A"),
 			"sk":     attrval.NewString("a"),
@@ -88,7 +88,7 @@ func TestPutItemGSIEmptyStringKey(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
 	_, err := c.PutItem(ctx, PutItemInput{
-		TableName: "Tbl",
+		TableName: "T",
 		Item: Item{
 			"pk":     attrval.NewString("A"),
 			"sk":     attrval.NewString("a"),
@@ -106,7 +106,7 @@ func TestPutItemCompositeGSISortAbsentAccepted(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
 	_, err := c.PutItem(ctx, PutItemInput{
-		TableName: "Tbl",
+		TableName: "T",
 		Item: Item{
 			"pk":     attrval.NewString("A"),
 			"sk":     attrval.NewString("a"),
@@ -122,12 +122,12 @@ func TestPutItemCompositeGSISortAbsentAccepted(t *testing.T) {
 func TestUpdateItemChangesGSIKey(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
-	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk": attrval.NewString("A"), "sk": attrval.NewString("a"),
 		"gsi_pk": attrval.NewString("G1"), "gsi_sk": attrval.NewString("s1"),
 	}})
 	if _, err := c.UpdateItem(ctx, UpdateItemInput{
-		TableName:        "Tbl",
+		TableName:        "T",
 		Key:              Item{"pk": attrval.NewString("A"), "sk": attrval.NewString("a")},
 		UpdateExpression: "SET gsi_pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{
@@ -141,12 +141,12 @@ func TestUpdateItemChangesGSIKey(t *testing.T) {
 func TestUpdateItemGSIKeyTypeMismatch(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
-	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk": attrval.NewString("A"), "sk": attrval.NewString("a"),
 		"gsi_pk": attrval.NewString("G1"), "gsi_sk": attrval.NewString("s1"),
 	}})
 	_, err := c.UpdateItem(ctx, UpdateItemInput{
-		TableName:        "Tbl",
+		TableName:        "T",
 		Key:              Item{"pk": attrval.NewString("A"), "sk": attrval.NewString("a")},
 		UpdateExpression: "SET gsi_pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{
@@ -162,7 +162,7 @@ func TestGSIQueryBasic(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
 	put := func(pk, sk, gpk, gsk string) {
-		c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+		c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 			"pk": attrval.NewString(pk), "sk": attrval.NewString(sk),
 			"gsi_pk": attrval.NewString(gpk), "gsi_sk": attrval.NewString(gsk),
 		}})
@@ -172,7 +172,7 @@ func TestGSIQueryBasic(t *testing.T) {
 	put("B", "b", "G1", "s2")
 
 	out, err := c.Query(ctx, QueryInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		IndexName:                 "gsi1",
 		KeyConditionExpression:    "gsi_pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
@@ -200,16 +200,16 @@ func TestGSIQueryBasic(t *testing.T) {
 func TestGSIQuerySparse(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
-	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk": attrval.NewString("D"), "sk": attrval.NewString("d"),
 		// no gsi_pk -> sparse
 	}})
-	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk": attrval.NewString("E"), "sk": attrval.NewString("e"),
 		"gsi_pk": attrval.NewString("G2"), "gsi_sk": attrval.NewString("s3"),
 	}})
 	out, err := c.Query(ctx, QueryInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		IndexName:                 "gsi1",
 		KeyConditionExpression:    "gsi_pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G2")},
@@ -226,7 +226,7 @@ func TestGSIQueryConsistentReadRejected(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
 	_, err := c.Query(ctx, QueryInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		IndexName:                 "gsi1",
 		KeyConditionExpression:    "gsi_pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
@@ -241,7 +241,7 @@ func TestGSIQueryNonGsiAttrInKeyCond(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
 	_, err := c.Query(ctx, QueryInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		IndexName:                 "gsi1",
 		KeyConditionExpression:    "pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("A")},
@@ -255,7 +255,7 @@ func TestGSIQueryIndexNotFound(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
 	_, err := c.Query(ctx, QueryInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		IndexName:                 "nope",
 		KeyConditionExpression:    "gsi_pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
@@ -270,7 +270,7 @@ func newGsiProjectionClient(t *testing.T) *Client {
 	c := newClient(t)
 	ctx := context.Background()
 	_, err := c.CreateTable(ctx, CreateTableInput{
-		TableName: "Pbl",
+		TableName: "P",
 		KeySchema: []KeySchemaElement{
 			{AttributeName: "pk", KeyType: "HASH"},
 			{AttributeName: "sk", KeyType: "RANGE"},
@@ -311,12 +311,12 @@ func newGsiProjectionClient(t *testing.T) *Client {
 func TestGSIProjectionKeysOnly(t *testing.T) {
 	c := newGsiProjectionClient(t)
 	ctx := context.Background()
-	c.PutItem(ctx, PutItemInput{TableName: "Pbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "P", Item: Item{
 		"pk": attrval.NewString("A"), "sk": attrval.NewString("a"),
 		"gpk": attrval.NewString("G1"), "proj1": attrval.NewString("foo"), "extra": attrval.NewString("baz"),
 	}})
 	out, err := c.Query(ctx, QueryInput{
-		TableName: "Pbl", IndexName: "keys",
+		TableName: "P", IndexName: "keys",
 		KeyConditionExpression:    "gpk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
 	})
@@ -336,13 +336,13 @@ func TestGSIProjectionKeysOnly(t *testing.T) {
 func TestGSIProjectionInclude(t *testing.T) {
 	c := newGsiProjectionClient(t)
 	ctx := context.Background()
-	c.PutItem(ctx, PutItemInput{TableName: "Pbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "P", Item: Item{
 		"pk": attrval.NewString("A"), "sk": attrval.NewString("a"),
 		"gpk": attrval.NewString("G1"), "gsk": attrval.NewString("s1"),
 		"proj1": attrval.NewString("foo"), "proj2": attrval.NewString("bar"), "extra": attrval.NewString("baz"),
 	}})
 	out, err := c.Query(ctx, QueryInput{
-		TableName: "Pbl", IndexName: "incl",
+		TableName: "P", IndexName: "incl",
 		KeyConditionExpression: "gpk = :v AND gsk = :s",
 		ExpressionAttributeValues: map[string]attrval.Value{
 			":v": attrval.NewString("G1"), ":s": attrval.NewString("s1"),
@@ -364,13 +364,13 @@ func TestGSIProjectionInclude(t *testing.T) {
 func TestGSIProjectionIncludeAbsentAttrsOmitted(t *testing.T) {
 	c := newGsiProjectionClient(t)
 	ctx := context.Background()
-	c.PutItem(ctx, PutItemInput{TableName: "Pbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "P", Item: Item{
 		"pk": attrval.NewString("C"), "sk": attrval.NewString("c"),
 		"gpk": attrval.NewString("G1"), "gsk": attrval.NewString("s1"),
 		// no proj1/proj2
 	}})
 	out, _ := c.Query(ctx, QueryInput{
-		TableName: "Pbl", IndexName: "incl",
+		TableName: "P", IndexName: "incl",
 		KeyConditionExpression: "gpk = :v AND gsk = :s",
 		ExpressionAttributeValues: map[string]attrval.Value{
 			":v": attrval.NewString("G1"), ":s": attrval.NewString("s1"),
@@ -416,7 +416,7 @@ func TestGSIQueryPagination(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
 	for i, gsk := range []string{"s1", "s2", "s3"} {
-		c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+		c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 			"pk":     attrval.NewString(string(rune('A' + i))),
 			"sk":     attrval.NewString(string(rune('a' + i))),
 			"gsi_pk": attrval.NewString("G1"),
@@ -428,7 +428,7 @@ func TestGSIQueryPagination(t *testing.T) {
 	var lek Item
 	for {
 		out, err := c.Query(ctx, QueryInput{
-			TableName:                 "Tbl",
+			TableName:                 "T",
 			IndexName:                 "gsi1",
 			KeyConditionExpression:    "gsi_pk = :v",
 			ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
@@ -455,7 +455,7 @@ func TestGSIQueryPaginationTrailingEmpty(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
 	for i, gsk := range []string{"s1", "s2"} {
-		c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+		c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 			"pk":     attrval.NewString(string(rune('A' + i))),
 			"sk":     attrval.NewString(string(rune('a' + i))),
 			"gsi_pk": attrval.NewString("G1"),
@@ -464,7 +464,7 @@ func TestGSIQueryPaginationTrailingEmpty(t *testing.T) {
 	}
 	// Limit == available (2): first page returns 2 with LEK set; resume returns empty with LEK nil.
 	out, err := c.Query(ctx, QueryInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		IndexName:                 "gsi1",
 		KeyConditionExpression:    "gsi_pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
@@ -477,7 +477,7 @@ func TestGSIQueryPaginationTrailingEmpty(t *testing.T) {
 		t.Fatalf("page 1: items=%d lek=%v, want 2 + non-nil LEK", len(out.Items), out.LastEvaluatedKey)
 	}
 	out2, err := c.Query(ctx, QueryInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		IndexName:                 "gsi1",
 		KeyConditionExpression:    "gsi_pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
@@ -498,7 +498,7 @@ func TestGSIQuerySortConditions(t *testing.T) {
 	for _, it := range []struct{ pk, sk, gsk string }{
 		{"A", "a", "s1"}, {"B", "b", "s2"}, {"C", "c", "s3"},
 	} {
-		c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+		c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 			"pk": attrval.NewString(it.pk), "sk": attrval.NewString(it.sk),
 			"gsi_pk": attrval.NewString("G1"), "gsi_sk": attrval.NewString(it.gsk),
 		}})
@@ -528,7 +528,7 @@ func TestGSIQuerySortConditions(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := c.Query(ctx, QueryInput{
-				TableName:                 "Tbl",
+				TableName:                 "T",
 				IndexName:                 "gsi1",
 				KeyConditionExpression:    tc.keyCond,
 				ExpressionAttributeValues: tc.vals,
@@ -554,13 +554,13 @@ func TestGSIQueryScanIndexForwardFalse(t *testing.T) {
 	for _, it := range []struct{ pk, gsk string }{
 		{"A", "s1"}, {"B", "s2"}, {"C", "s3"},
 	} {
-		c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+		c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 			"pk": attrval.NewString(it.pk), "sk": attrval.NewString("x"),
 			"gsi_pk": attrval.NewString("G1"), "gsi_sk": attrval.NewString(it.gsk),
 		}})
 	}
 	out, err := c.Query(ctx, QueryInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		IndexName:                 "gsi1",
 		KeyConditionExpression:    "gsi_pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
@@ -579,15 +579,15 @@ func TestGSIQueryScanIndexForwardFalse(t *testing.T) {
 func TestGSIScan(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
-	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk": attrval.NewString("A"), "sk": attrval.NewString("a"),
 		"gsi_pk": attrval.NewString("G1"), "gsi_sk": attrval.NewString("s1"),
 	}})
-	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk": attrval.NewString("D"), "sk": attrval.NewString("d"),
 		// sparse
 	}})
-	out, err := c.Scan(ctx, ScanInput{TableName: "Tbl", IndexName: "gsi1"})
+	out, err := c.Scan(ctx, ScanInput{TableName: "T", IndexName: "gsi1"})
 	if err != nil {
 		t.Fatalf("GSI Scan: %v", err)
 	}
@@ -603,7 +603,7 @@ func TestGSIScanPagination(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
 	for i := range 3 {
-		c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+		c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 			"pk":     attrval.NewString(string(rune('A' + i))),
 			"sk":     attrval.NewString(string(rune('a' + i))),
 			"gsi_pk": attrval.NewString("G" + string(rune('1'+i))),
@@ -614,7 +614,7 @@ func TestGSIScanPagination(t *testing.T) {
 	var lek Item
 	for {
 		out, err := c.Scan(ctx, ScanInput{
-			TableName: "Tbl", IndexName: "gsi1", Limit: 2, ExclusiveStartKey: lek,
+			TableName: "T", IndexName: "gsi1", Limit: 2, ExclusiveStartKey: lek,
 		})
 		if err != nil {
 			t.Fatalf("Scan page: %v", err)
@@ -635,16 +635,16 @@ func TestGSIScanPagination(t *testing.T) {
 func TestGSILekComposition(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
-	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk": attrval.NewString("A"), "sk": attrval.NewString("a"),
 		"gsi_pk": attrval.NewString("G1"), "gsi_sk": attrval.NewString("s1"),
 	}})
-	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk": attrval.NewString("B"), "sk": attrval.NewString("b"),
 		"gsi_pk": attrval.NewString("G1"), "gsi_sk": attrval.NewString("s2"),
 	}})
 	out, _ := c.Query(ctx, QueryInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		IndexName:                 "gsi1",
 		KeyConditionExpression:    "gsi_pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
@@ -663,17 +663,17 @@ func TestGSILekComposition(t *testing.T) {
 func TestGSIQueryEskShapeValidation(t *testing.T) {
 	c := newGsiClient(t)
 	ctx := context.Background()
-	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk": attrval.NewString("A"), "sk": attrval.NewString("a"),
 		"gsi_pk": attrval.NewString("G1"), "gsi_sk": attrval.NewString("s1"),
 	}})
-	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk": attrval.NewString("B"), "sk": attrval.NewString("b"),
 		"gsi_pk": attrval.NewString("G1"), "gsi_sk": attrval.NewString("s2"),
 	}})
 	// Table-keys-only ESK -> rejected (needs GSI keys too).
 	_, err := c.Query(ctx, QueryInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		IndexName:                 "gsi1",
 		KeyConditionExpression:    "gsi_pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
@@ -684,7 +684,7 @@ func TestGSIQueryEskShapeValidation(t *testing.T) {
 	}
 	// GSI-keys-only ESK -> rejected (needs table keys too).
 	_, err = c.Query(ctx, QueryInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		IndexName:                 "gsi1",
 		KeyConditionExpression:    "gsi_pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
@@ -695,7 +695,7 @@ func TestGSIQueryEskShapeValidation(t *testing.T) {
 	}
 	// Union+extra -> rejected.
 	_, err = c.Query(ctx, QueryInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		IndexName:                 "gsi1",
 		KeyConditionExpression:    "gsi_pk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
@@ -711,9 +711,9 @@ func TestGSIQueryEskShapeValidation(t *testing.T) {
 }
 
 func TestDescribeTableGsiIndexStatus(t *testing.T) {
-	c := newGsiClient(t) // table "Tbl" with GSI "gsi1"
+	c := newGsiClient(t) // table "T" with GSI "gsi1"
 	ctx := context.Background()
-	desc, err := c.DescribeTable(ctx, DescribeTableInput{TableName: "Tbl"})
+	desc, err := c.DescribeTable(ctx, DescribeTableInput{TableName: "T"})
 	if err != nil {
 		t.Fatalf("DescribeTable: %v", err)
 	}

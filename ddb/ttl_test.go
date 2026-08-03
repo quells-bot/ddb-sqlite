@@ -7,26 +7,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite/attrval"
 )
 
 func TestUpdateTimeToLive(t *testing.T) {
 	c := newClient(t)
 	ctx := context.Background()
 	c.CreateTable(ctx, CreateTableInput{
-		TableName:            "Tbl",
+		TableName:            "T",
 		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
 		AttributeDefinitions: []AttributeDefinition{{AttributeName: "pk", AttributeType: "S"}},
 	})
 
 	// Enable.
 	if _, err := c.UpdateTimeToLive(ctx, UpdateTimeToLiveInput{
-		TableName:               "Tbl",
+		TableName:               "T",
 		TimeToLiveSpecification: TimeToLiveSpecification{Enabled: true, AttributeName: "expire"},
 	}); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
-	out, err := c.DescribeTimeToLive(ctx, DescribeTimeToLiveInput{TableName: "Tbl"})
+	out, err := c.DescribeTimeToLive(ctx, DescribeTimeToLiveInput{TableName: "T"})
 	if err != nil {
 		t.Fatalf("describe after enable: %v", err)
 	}
@@ -36,7 +36,7 @@ func TestUpdateTimeToLive(t *testing.T) {
 
 	// Idempotent: re-enable with the same attr is a no-op.
 	if _, err := c.UpdateTimeToLive(ctx, UpdateTimeToLiveInput{
-		TableName:               "Tbl",
+		TableName:               "T",
 		TimeToLiveSpecification: TimeToLiveSpecification{Enabled: true, AttributeName: "expire"},
 	}); err != nil {
 		t.Fatalf("idempotent re-enable: %v", err)
@@ -44,24 +44,24 @@ func TestUpdateTimeToLive(t *testing.T) {
 
 	// Re-specify a different attr while enabled overwrites.
 	if _, err := c.UpdateTimeToLive(ctx, UpdateTimeToLiveInput{
-		TableName:               "Tbl",
+		TableName:               "T",
 		TimeToLiveSpecification: TimeToLiveSpecification{Enabled: true, AttributeName: "ttl"},
 	}); err != nil {
 		t.Fatalf("re-specify: %v", err)
 	}
-	out, _ = c.DescribeTimeToLive(ctx, DescribeTimeToLiveInput{TableName: "Tbl"})
+	out, _ = c.DescribeTimeToLive(ctx, DescribeTimeToLiveInput{TableName: "T"})
 	if out.AttributeName != "ttl" {
 		t.Errorf("after re-specify: attr=%q, want ttl", out.AttributeName)
 	}
 
 	// Disable.
 	if _, err := c.UpdateTimeToLive(ctx, UpdateTimeToLiveInput{
-		TableName:               "Tbl",
+		TableName:               "T",
 		TimeToLiveSpecification: TimeToLiveSpecification{Enabled: false, AttributeName: "ttl"},
 	}); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	out, _ = c.DescribeTimeToLive(ctx, DescribeTimeToLiveInput{TableName: "Tbl"})
+	out, _ = c.DescribeTimeToLive(ctx, DescribeTimeToLiveInput{TableName: "T"})
 	if out.TimeToLiveStatus != "DISABLED" || out.AttributeName != "" {
 		t.Errorf("after disable: status=%q attr=%q, want DISABLED/empty", out.TimeToLiveStatus, out.AttributeName)
 	}
@@ -77,7 +77,7 @@ func TestUpdateTimeToLive(t *testing.T) {
 
 	// Empty attr name -> ErrValidation (enabling).
 	_, err = c.UpdateTimeToLive(ctx, UpdateTimeToLiveInput{
-		TableName:               "Tbl",
+		TableName:               "T",
 		TimeToLiveSpecification: TimeToLiveSpecification{Enabled: true, AttributeName: ""},
 	})
 	if !errors.Is(err, ErrValidation) {
@@ -86,7 +86,7 @@ func TestUpdateTimeToLive(t *testing.T) {
 
 	// Empty attr name -> ErrValidation even when disabling (required unconditionally).
 	_, err = c.UpdateTimeToLive(ctx, UpdateTimeToLiveInput{
-		TableName:               "Tbl",
+		TableName:               "T",
 		TimeToLiveSpecification: TimeToLiveSpecification{Enabled: false, AttributeName: ""},
 	})
 	if !errors.Is(err, ErrValidation) {
@@ -95,7 +95,7 @@ func TestUpdateTimeToLive(t *testing.T) {
 
 	// Oversized attr name -> ErrValidation.
 	_, err = c.UpdateTimeToLive(ctx, UpdateTimeToLiveInput{
-		TableName:               "Tbl",
+		TableName:               "T",
 		TimeToLiveSpecification: TimeToLiveSpecification{Enabled: true, AttributeName: mustName(256)},
 	})
 	if !errors.Is(err, ErrValidation) {
@@ -104,7 +104,7 @@ func TestUpdateTimeToLive(t *testing.T) {
 
 	// A 255-char name is accepted.
 	if _, err := c.UpdateTimeToLive(ctx, UpdateTimeToLiveInput{
-		TableName:               "Tbl",
+		TableName:               "T",
 		TimeToLiveSpecification: TimeToLiveSpecification{Enabled: true, AttributeName: mustName(255)},
 	}); err != nil {
 		t.Errorf("255-char attr: err = %v, want nil", err)
@@ -124,13 +124,13 @@ func TestDescribeTimeToLive(t *testing.T) {
 	c := newClient(t)
 	ctx := context.Background()
 	c.CreateTable(ctx, CreateTableInput{
-		TableName:            "Tbl",
+		TableName:            "T",
 		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
 		AttributeDefinitions: []AttributeDefinition{{AttributeName: "pk", AttributeType: "S"}},
 	})
 
 	// Never configured -> DISABLED, empty attr.
-	out, err := c.DescribeTimeToLive(ctx, DescribeTimeToLiveInput{TableName: "Tbl"})
+	out, err := c.DescribeTimeToLive(ctx, DescribeTimeToLiveInput{TableName: "T"})
 	if err != nil {
 		t.Fatalf("describe never-set: %v", err)
 	}
@@ -165,33 +165,33 @@ func TestExpireExpired(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = c.Close() })
 	c.CreateTable(ctx, CreateTableInput{
-		TableName:            "Tbl",
+		TableName:            "T",
 		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
 		AttributeDefinitions: []AttributeDefinition{{AttributeName: "pk", AttributeType: "S"}},
 	})
 	c.UpdateTimeToLive(ctx, UpdateTimeToLiveInput{
-		TableName:               "Tbl",
+		TableName:               "T",
 		TimeToLiveSpecification: TimeToLiveSpecification{Enabled: true, AttributeName: "expire"},
 	})
 
 	epoch := now.Unix()
 	past := strconv.FormatInt(epoch-60, 10)   // expired
 	future := strconv.FormatInt(epoch+60, 10) // not expired
-	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk":     attrval.NewString("expired"),
 		"expire": attrval.NewNumber(mustNum(past)),
 	}})
-	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk":     attrval.NewString("future"),
 		"expire": attrval.NewNumber(mustNum(future)),
 	}})
 
 	// Expired items are visible on reads BEFORE ExpireExpired (Faithful).
-	if got, _ := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("expired")}}); len(got.Item) == 0 {
+	if got, _ := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("expired")}}); len(got.Item) == 0 {
 		t.Fatal("expired item not visible before ExpireExpired; read filtering is on")
 	}
 
-	n, err := c.ExpireExpired(ctx, "Tbl")
+	n, err := c.ExpireExpired(ctx, "T")
 	if err != nil {
 		t.Fatalf("ExpireExpired: %v", err)
 	}
@@ -200,16 +200,16 @@ func TestExpireExpired(t *testing.T) {
 	}
 
 	// Expired item is gone; survivor remains.
-	if got, _ := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("expired")}}); len(got.Item) != 0 {
+	if got, _ := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("expired")}}); len(got.Item) != 0 {
 		t.Error("expired item still present after ExpireExpired")
 	}
-	if got, _ := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("future")}}); len(got.Item) == 0 {
+	if got, _ := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("future")}}); len(got.Item) == 0 {
 		t.Error("future item missing after ExpireExpired")
 	}
 
 	// Advance the clock past the survivor; it now expires.
 	now = now.Add(2 * time.Minute)
-	n, _ = c.ExpireExpired(ctx, "Tbl")
+	n, _ = c.ExpireExpired(ctx, "T")
 	if n != 1 {
 		t.Errorf("after advancing clock: deleted = %d, want 1", n)
 	}
@@ -224,12 +224,12 @@ func TestExpireExpiredEdgeCases(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = c.Close() })
 	c.CreateTable(ctx, CreateTableInput{
-		TableName:            "Tbl",
+		TableName:            "T",
 		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
 		AttributeDefinitions: []AttributeDefinition{{AttributeName: "pk", AttributeType: "S"}},
 	})
 	c.UpdateTimeToLive(ctx, UpdateTimeToLiveInput{
-		TableName:               "Tbl",
+		TableName:               "T",
 		TimeToLiveSpecification: TimeToLiveSpecification{Enabled: true, AttributeName: "expire"},
 	})
 
@@ -246,10 +246,10 @@ func TestExpireExpiredEdgeCases(t *testing.T) {
 		{"future", Item{"pk": attrval.NewString("future"), "expire": attrval.NewNumber(mustNum(strconv.FormatInt(epoch+60, 10)))}},                  // kept
 	}
 	for _, tc := range cases {
-		c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: tc.item})
+		c.PutItem(ctx, PutItemInput{TableName: "T", Item: tc.item})
 	}
 
-	n, err := c.ExpireExpired(ctx, "Tbl")
+	n, err := c.ExpireExpired(ctx, "T")
 	if err != nil {
 		t.Fatalf("ExpireExpired: %v", err)
 	}
@@ -257,17 +257,17 @@ func TestExpireExpiredEdgeCases(t *testing.T) {
 		t.Errorf("deleted = %d, want 3", n)
 	}
 	for _, kept := range []string{"absent", "nonnum", "future"} {
-		if got, _ := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString(kept)}}); len(got.Item) == 0 {
+		if got, _ := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString(kept)}}); len(got.Item) == 0 {
 			t.Errorf("item %q should have been kept", kept)
 		}
 	}
 
 	// ExpireExpired returns 0 when TTL is disabled.
 	c.UpdateTimeToLive(ctx, UpdateTimeToLiveInput{
-		TableName:               "Tbl",
+		TableName:               "T",
 		TimeToLiveSpecification: TimeToLiveSpecification{Enabled: false, AttributeName: "expire"},
 	})
-	n, _ = c.ExpireExpired(ctx, "Tbl")
+	n, _ = c.ExpireExpired(ctx, "T")
 	if n != 0 {
 		t.Errorf("disabled TTL: deleted = %d, want 0", n)
 	}

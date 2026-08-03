@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite/attrval"
 )
 
 // Env carries the request's substitution maps. Keys include their sigil, as the
@@ -26,9 +26,6 @@ type BoundCondition struct {
 // Bind resolves #name and :value references against env, returning a bound copy
 // of the expression. A reference absent from env is ErrUndefined.
 func (c *Condition) Bind(env Env) (*BoundCondition, error) {
-	if err := checkSubstitutionLimits(env); err != nil {
-		return nil, err
-	}
 	b := binder{env: env}
 	root, err := b.cond(c.root)
 	if err != nil {
@@ -76,14 +73,6 @@ func (b binder) cond(n condNode) (condNode, error) {
 		if err != nil {
 			return nil, err
 		}
-		if t.op == opLt || t.op == opLe || t.op == opGt || t.op == opGe {
-			if err := checkOrderableValue(l); err != nil {
-				return nil, err
-			}
-			if err := checkOrderableValue(r); err != nil {
-				return nil, err
-			}
-		}
 		return &cmpNode{op: t.op, left: l, right: r}, nil
 	case *betweenNode:
 		o, err := b.operand(t.operand)
@@ -96,12 +85,6 @@ func (b binder) cond(n condNode) (condNode, error) {
 		}
 		hi, err := b.operand(t.hi)
 		if err != nil {
-			return nil, err
-		}
-		if err := checkOrderableValue(lo); err != nil {
-			return nil, err
-		}
-		if err := checkOrderableValue(hi); err != nil {
 			return nil, err
 		}
 		return &betweenNode{operand: o, lo: lo, hi: hi}, nil
@@ -153,25 +136,6 @@ func (b binder) operand(o operandNode) (operandNode, error) {
 	return nil, fmt.Errorf("%w: unknown operand %T", ErrSemantic, o)
 }
 
-// checkOrderableValue rejects a literal :value operand whose type DynamoDB's
-// ordering comparators and BETWEEN bounds do not accept — anything but S, N,
-// or B is a request-time ValidationException ("Incorrect operand type for
-// operator or function"). The rejection is item-independent: it fires even
-// when the compared attribute is missing, so it lives in Bind, not Eval
-// (M6c W8, measured against dynamodb-local 3.3.1). Path operands are exempt:
-// a non-scalar *attribute* evaluates false rather than erroring.
-func checkOrderableValue(o operandNode) error {
-	v, ok := o.(*valueOperand)
-	if !ok {
-		return nil
-	}
-	switch v.val.Tag() {
-	case attrval.TagString, attrval.TagNumber, attrval.TagBinary:
-		return nil
-	}
-	return fmt.Errorf("%w: incorrect operand type for ordering comparator or BETWEEN: %s", ErrSemantic, v.val.Type())
-}
-
 // value resolves one ":v" reference against the environment. Shared by the
 // condition and update binders so the ErrUndefined message is identical.
 func (b binder) value(t *valueOperand) (*valueOperand, error) {
@@ -183,9 +147,6 @@ func (b binder) value(t *valueOperand) (*valueOperand, error) {
 }
 
 func (b binder) path(p *pathOperand) (*pathOperand, error) {
-	if len(p.segs) > maxPathDepth {
-		return nil, fmt.Errorf("%w: nesting levels: %d", ErrLimit, len(p.segs))
-	}
 	resolved := make(attrval.Path, 0, len(p.segs))
 	for _, seg := range p.segs {
 		if seg.isIndex {
@@ -325,9 +286,6 @@ type BoundUpdate struct {
 // order. Overlap can only be computed after binding, because two different
 // aliases may resolve to the same attribute name.
 func (u *Update) Bind(env Env) (*BoundUpdate, error) {
-	if err := checkSubstitutionLimits(env); err != nil {
-		return nil, err
-	}
 	b := binder{env: env}
 	out := &BoundUpdate{}
 

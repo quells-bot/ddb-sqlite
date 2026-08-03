@@ -1,6 +1,6 @@
 package expr
 
-import "github.com/quells-bot/ddb-sqlite-core/attrval"
+import "github.com/quells-bot/ddb-sqlite/attrval"
 
 // Condition is a parsed condition or filter expression. It is independent of
 // substitution maps and of any item: call Bind to resolve #name/:value against

@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite-core/internal/num"
+	"github.com/quells-bot/ddb-sqlite/internal/num"
 )
 
 func TestStringSet(t *testing.T) {

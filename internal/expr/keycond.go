@@ -3,7 +3,7 @@ package expr
 import (
 	"fmt"
 
-	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite/attrval"
 )
 
 // KeyCondition is the validated, extracted form of a

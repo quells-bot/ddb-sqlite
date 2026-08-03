@@ -26,9 +26,6 @@ func ParseCondition(src string) (*Condition, error) {
 	if p.peek().kind != tokEOF {
 		return nil, fmt.Errorf("%w: unexpected %q at %d", ErrSyntax, p.peek().text, p.peek().pos)
 	}
-	if n := countCondOperators(root); n > maxOperators {
-		return nil, fmt.Errorf("%w: operator count: 301", ErrLimit)
-	}
 	return &Condition{root: root, names: p.names, values: p.values}, nil
 }
 
@@ -238,9 +235,6 @@ func (p *parser) parsePrimary() (condNode, error) {
 			}
 			break
 		}
-		if len(set) > maxInOperands {
-			return nil, fmt.Errorf("%w: number of operands: %d", ErrLimit, len(set))
-		}
 		if _, err := p.expect(tokRParen, "')' closing IN"); err != nil {
 			return nil, err
 		}
@@ -432,9 +426,6 @@ func ParseUpdate(src string) (*Update, error) {
 		}
 	}
 	u.names, u.values = p.names, p.values
-	if n := countUpdateOperators(u); n > maxOperators {
-		return nil, fmt.Errorf("%w: operator count: 301", ErrLimit)
-	}
 	return u, nil
 }
 

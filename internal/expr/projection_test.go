@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite/attrval"
 )
 
 func pathsEq(a, b []attrval.Path) bool {
@@ -72,7 +72,12 @@ func TestParseProjection(t *testing.T) {
 			var want []attrval.Path
 			for _, wp := range tc.want {
 				r := make(attrval.Path, len(wp))
-				copy(r, wp)
+				for i, seg := range wp {
+					if !seg.IsIndex && len(seg.Name) > 0 && seg.Name[0] == '#' {
+						seg.Name = seg.Name // resolves to itself
+					}
+					r[i] = seg
+				}
 				want = append(want, r)
 			}
 			if !pathsEq(b.Paths(), want) {
@@ -84,14 +89,14 @@ func TestParseProjection(t *testing.T) {
 
 func TestParseProjectionRejects(t *testing.T) {
 	for _, src := range []string{
-		"",        // empty
-		":v",      // value ref
-		"size(a)", // function
-		"a = :v",  // comparator
-		"a, ",     // trailing comma
-		",a",      // leading comma
-		"a b",     // missing comma
-		"a, a[",   // unterminated index
+		"",           // empty
+		":v",         // value ref
+		"size(a)",    // function
+		"a = :v",     // comparator
+		"a, ",        // trailing comma
+		",a",         // leading comma
+		"a b",        // missing comma
+		"a, a[",      // unterminated index
 	} {
 		if _, err := ParseProjection(src); err == nil {
 			t.Errorf("ParseProjection(%q): want error", src)

@@ -8,7 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/smithy-go"
 
-	"github.com/quells-bot/ddb-sqlite-core/ddb"
+	"github.com/quells-bot/ddb-sqlite/ddb"
 )
 
 // rejectLegacyQuery refuses the deprecated pre-expression parameters on Query.

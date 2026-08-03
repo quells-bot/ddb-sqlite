@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite/attrval"
 )
 
 // applyWith parses, binds, and applies src against item. It returns the new

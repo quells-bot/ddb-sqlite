@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite-core/internal/num"
+	"github.com/quells-bot/ddb-sqlite/internal/num"
 )
 
 func TestMarshalJSON(t *testing.T) {

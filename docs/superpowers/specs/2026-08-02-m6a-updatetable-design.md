@@ -140,7 +140,7 @@ Adapter `mapError` additions (`awsdynamodb/adapter.go`):
 
 **`TableStatus`.** The adapter's `toSDKTableDescription` also sets `TableStatus: types.TableStatusActive` on every description — a small baseline fix bundled with M6a, since today it leaves the field empty, which real DynamoDB never does for an existing table. `UpdateTableOutput` therefore reports `ACTIVE` too; real AWS reports `UPDATING` during backfill, but the mock is synchronous, so `ACTIVE` is the honest steady-state. Conformance asserts `TableStatus` only in quiescent cases — never immediately after an `UpdateTable` on the dynamodb-local target.
 
-**`ItemCount`/`IndexSizeBytes`.** M6a reported both as **0** for every GSI. M6c W5 now reports real, immediate values (the W1 item-accounting sum stored at write time; per-GSI `IndexSizeBytes` is the full-item W1 sum over indexed items, projection-independent — P-desc). See `docs/superpowers/specs/2026-08-03-m6c-hardening-design.md` §6.2.
+**`ItemCount`/`IndexSizeBytes`.** The adapter currently reports both as **0** for every GSI (pre-existing behavior — reported as zero, *not* omitted). Real DynamoDB eventually-populates them; the mock keeps reporting 0. M6a leaves this unchanged and conformance cases never assert them. Reporting real values remains out of scope (§9).
 
 `AttributeDefinitions` in `DescribeTable` already includes GSI key attrs: the existing `describeFromDef` dedups them by walking `def.GSIs`. After a `Create` adds a new GSI with new key attrs, the next `DescribeTable` includes those new `AttributeDefinition` entries — no change needed to that logic.
 
@@ -268,12 +268,12 @@ Deferred to M6b or later, and **not** covered by this spec:
 
 - Full conformance golden-corpus gap-fill and edge-case audit (null vs missing attributes, type-mismatched comparisons, sparse GSIs, trailing empty pages, `LastEvaluatedKey` resume at partition end).
 - Fuzz pass beyond the existing expression targets.
-- ~~`ItemCount`/`IndexSizeBytes` reporting in `DescribeTable`~~ — resolved by M6c W5 (real, immediate W1-accounting values reported).
+- `ItemCount`/`IndexSizeBytes` reporting in `DescribeTable` (the adapter reports 0 today; unchanged).
 - Any asynchronous `CREATING`/`Backfilling`/`DELETING` status simulation, and any `UPDATING` table status.
 - Modeling `BillingMode`, provisioned throughput, SSE, streams, or replicas behaviorally.
 - **Lumping of ignored fields.** Multiple ignored fields in one call with no GSI entry (e.g. `BillingMode` + `SSESpecification`) count as a single accepted-and-ignored operation and pass as a no-op; real AWS may reject some of those combinations as multiple operations. GSI throughput `Update` actions are **not** lumped: each counts as an operation, so multiple `Update` actions or an `Update` combined with any other operation are rejected with `ValidationException` (§6 structural checks, probe P4).
 - **Error precedence among validation rules** (e.g. an existing GSI name combined with an invalid key schema — which error surfaces). The engine's rule order (§2.2) is fixed but unprobed; real AWS may order the checks differently.
-- Empty-table-name validation on operations other than `UpdateTable` (pre-existing adapter gap; §6 adds the guard for `UpdateTable` only) — resolved by M6c W3 (2026-08-03): engine-side validateTableName guards all 12 ops; the adapter guard is deleted.
+- Empty-table-name validation on operations other than `UpdateTable` (pre-existing adapter gap; §6 adds the guard for `UpdateTable` only).
 - A GSI named identically to its table (no collision check exists in `CreateTable`; carried over unchanged).
 - ProjectionExpression (parent spec §8 out of scope for v1).
 - `UpdateTable` on a table in the `CREATING`/`DELETING` state (the engine has no such table states).

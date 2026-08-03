@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/quells-bot/ddb-sqlite-core/attrval"
-	"github.com/quells-bot/ddb-sqlite-core/internal/num"
+	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite/internal/num"
 )
 
 // TouchedAttribute describes one top-level attribute's contribution to the

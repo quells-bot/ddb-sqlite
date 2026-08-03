@@ -3,7 +3,7 @@ package attrval
 import (
 	"bytes"
 
-	"github.com/quells-bot/ddb-sqlite-core/internal/num"
+	"github.com/quells-bot/ddb-sqlite/internal/num"
 )
 
 // Equal reports whether v and o are the same DynamoDB value. Numbers compare

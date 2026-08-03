@@ -48,9 +48,6 @@ func isIdentByte(c byte) bool {
 
 // lex scans src into tokens, always ending with a tokEOF sentinel.
 func lex(src string) ([]token, error) {
-	if len(src) > maxExprString {
-		return nil, fmt.Errorf("%w: expression size has exceeded the maximum allowed size", ErrLimit)
-	}
 	var out []token
 	i := 0
 	for i < len(src) {

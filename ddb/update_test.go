@@ -5,16 +5,16 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite/attrval"
 )
 
-// newUpdateTable opens a client with a single-key table "Tbl" and returns both.
+// newUpdateTable opens a client with a single-key table "T" and returns both.
 func newUpdateTable(t *testing.T) (*Client, context.Context) {
 	t.Helper()
 	c := newClient(t)
 	ctx := context.Background()
 	if _, err := c.CreateTable(ctx, CreateTableInput{
-		TableName:            "Tbl",
+		TableName:            "T",
 		KeySchema:            []KeySchemaElement{{"pk", "HASH"}},
 		AttributeDefinitions: []AttributeDefinition{{"pk", "S"}},
 	}); err != nil {
@@ -25,7 +25,7 @@ func newUpdateTable(t *testing.T) (*Client, context.Context) {
 
 func mustGet(t *testing.T, c *Client, ctx context.Context, pk string) Item {
 	t.Helper()
-	out, err := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString(pk)}})
+	out, err := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString(pk)}})
 	if err != nil {
 		t.Fatalf("GetItem(%q): %v", pk, err)
 	}
@@ -37,7 +37,7 @@ func TestUpdateItemUpsert(t *testing.T) {
 
 	// An update against an absent key creates the item.
 	if _, err := c.UpdateItem(ctx, UpdateItemInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		Key:                       Item{"pk": attrval.NewString("k")},
 		UpdateExpression:          "SET s = :s",
 		ExpressionAttributeValues: map[string]attrval.Value{":s": attrval.NewString("v")},
@@ -50,7 +50,7 @@ func TestUpdateItemUpsert(t *testing.T) {
 	}
 
 	// No UpdateExpression at all creates a key-only item.
-	if _, err := c.UpdateItem(ctx, UpdateItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("bare")}}); err != nil {
+	if _, err := c.UpdateItem(ctx, UpdateItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("bare")}}); err != nil {
 		t.Fatalf("key-only upsert: %v", err)
 	}
 	if got := mustGet(t, c, ctx, "bare"); len(got) != 1 || got["pk"].Str() != "bare" {
@@ -62,7 +62,7 @@ func TestUpdateItemActions(t *testing.T) {
 	c, ctx := newUpdateTable(t)
 	seed := func() {
 		t.Helper()
-		if _, err := c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+		if _, err := c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 			"pk": attrval.NewString("k"),
 			"s":  attrval.NewString("hello"),
 			"n":  attrval.NewNumber(mustNum("42")),
@@ -122,7 +122,7 @@ func TestUpdateItemActions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			seed()
 			if _, err := c.UpdateItem(ctx, UpdateItemInput{
-				TableName:                 "Tbl",
+				TableName:                 "T",
 				Key:                       Item{"pk": attrval.NewString("k")},
 				UpdateExpression:          tc.expr,
 				ExpressionAttributeValues: tc.values,
@@ -136,7 +136,7 @@ func TestUpdateItemActions(t *testing.T) {
 
 func TestUpdateItemReturnValues(t *testing.T) {
 	c, ctx := newUpdateTable(t)
-	if _, err := c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	if _, err := c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk":    attrval.NewString("k"),
 		"s":     attrval.NewString("old"),
 		"other": attrval.NewString("keep"),
@@ -163,13 +163,13 @@ func TestUpdateItemReturnValues(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			// Re-seed so every mode sees the same before-state.
-			if _, err := c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+			if _, err := c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 				"pk": attrval.NewString("k"), "s": attrval.NewString("old"), "other": attrval.NewString("keep"),
 			}}); err != nil {
 				t.Fatalf("re-seed: %v", err)
 			}
 			out, err := c.UpdateItem(ctx, UpdateItemInput{
-				TableName:                 "Tbl",
+				TableName:                 "T",
 				Key:                       Item{"pk": attrval.NewString("k")},
 				UpdateExpression:          "SET s = :s",
 				ExpressionAttributeValues: map[string]attrval.Value{":s": attrval.NewString("new")},
@@ -197,7 +197,7 @@ func TestUpdateItemReturnValues(t *testing.T) {
 
 	// ALL_OLD against an absent key returns nothing.
 	out, err := c.UpdateItem(ctx, UpdateItemInput{
-		TableName:                 "Tbl",
+		TableName:                 "T",
 		Key:                       Item{"pk": attrval.NewString("absent")},
 		UpdateExpression:          "SET s = :s",
 		ExpressionAttributeValues: map[string]attrval.Value{":s": attrval.NewString("x")},
@@ -213,7 +213,7 @@ func TestUpdateItemReturnValues(t *testing.T) {
 
 func TestUpdateItemCondition(t *testing.T) {
 	c, ctx := newUpdateTable(t)
-	if _, err := c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
+	if _, err := c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
 		"pk": attrval.NewString("k"), "s": attrval.NewString("old"),
 	}}); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -221,7 +221,7 @@ func TestUpdateItemCondition(t *testing.T) {
 
 	// Unsatisfied condition: the item is untouched and the error carries it.
 	_, err := c.UpdateItem(ctx, UpdateItemInput{
-		TableName:        "Tbl",
+		TableName:        "T",
 		Key:              Item{"pk": attrval.NewString("k")},
 		UpdateExpression: "SET s = :new",
 		// #a and :want are used only by the condition; :new only by the update.
@@ -256,14 +256,14 @@ func TestUpdateItemValidation(t *testing.T) {
 		name string
 		in   UpdateItemInput
 	}{
-		{"key attribute target", UpdateItemInput{TableName: "Tbl", Key: key, UpdateExpression: "SET pk = :v", ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("other")}}},
-		{"REMOVE of a key attribute", UpdateItemInput{TableName: "Tbl", Key: key, UpdateExpression: "REMOVE pk"}},
-		{"nested ADD", UpdateItemInput{TableName: "Tbl", Key: key, UpdateExpression: "ADD a.b :v", ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewNumber(mustNum("1"))}}},
-		{"malformed expression", UpdateItemInput{TableName: "Tbl", Key: key, UpdateExpression: "SET a"}},
-		{"unsupported ReturnValues", UpdateItemInput{TableName: "Tbl", Key: key, ReturnValues: "NOPE"}},
-		{"unsupported ReturnValuesOnConditionCheckFailure", UpdateItemInput{TableName: "Tbl", Key: key, ReturnValuesOnConditionCheckFailure: "NOPE"}},
-		{"overlapping paths", UpdateItemInput{TableName: "Tbl", Key: key, UpdateExpression: "SET a = :v REMOVE a", ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("x")}}},
-		{"key with an extra attribute", UpdateItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("k"), "extra": attrval.NewString("x")}}},
+		{"key attribute target", UpdateItemInput{TableName: "T", Key: key, UpdateExpression: "SET pk = :v", ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("other")}}},
+		{"REMOVE of a key attribute", UpdateItemInput{TableName: "T", Key: key, UpdateExpression: "REMOVE pk"}},
+		{"nested ADD", UpdateItemInput{TableName: "T", Key: key, UpdateExpression: "ADD a.b :v", ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewNumber(mustNum("1"))}}},
+		{"malformed expression", UpdateItemInput{TableName: "T", Key: key, UpdateExpression: "SET a"}},
+		{"unsupported ReturnValues", UpdateItemInput{TableName: "T", Key: key, ReturnValues: "NOPE"}},
+		{"unsupported ReturnValuesOnConditionCheckFailure", UpdateItemInput{TableName: "T", Key: key, ReturnValuesOnConditionCheckFailure: "NOPE"}},
+		{"overlapping paths", UpdateItemInput{TableName: "T", Key: key, UpdateExpression: "SET a = :v REMOVE a", ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("x")}}},
+		{"key with an extra attribute", UpdateItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("k"), "extra": attrval.NewString("x")}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -40,7 +40,7 @@ num.Decimal ──┐
 ## Key Directories
 
 ```
-ddb-sqlite/                      # module github.com/quells-bot/ddb-sqlite-core (SDK-free, go 1.25)
+ddb-sqlite/                      # module github.com/quells-bot/ddb-sqlite (SDK-free, go 1.25)
 ├── go.mod / go.sum
 ├── IDEA.md                      # design overview / intent
 ├── ddb/                         # IMPORTABLE engine: Client, table ops, item ops, exported errors
@@ -77,7 +77,7 @@ ddb-sqlite/                      # module github.com/quells-bot/ddb-sqlite-core 
 │       ├── reserved.go          # reserved words
 │       └── *_test.go            # lex/parse/bind/eval unit + fuzz tests
 ├── awsdynamodb/                 # SEPARATE MODULE (go 1.26.5) — depends on AWS SDK v2
-│   ├── go.mod                   # replace github.com/quells-bot/ddb-sqlite-core => ..
+│   ├── go.mod                   # replace github.com/quells-bot/ddb-sqlite => ..
 │   ├── adapter.go               # Adapter implements SDK DynamoDBAPI subset; mapError → SDK exceptions
 │   ├── marshal.go               # FromSDK/ToSDK AttributeValue ↔ attrval.Value, FromSDKMap/ToSDKMap
 │   ├── conformance_test.go      # parameterized conformance harness (adapter + dynamodb-local)
@@ -119,8 +119,8 @@ go mod tidy && (cd awsdynamodb && go mod tidy)
 ```
 
 Two Go modules must be built/tested independently:
-- Root: `github.com/quells-bot/ddb-sqlite-core` (go 1.25, no AWS SDK)
-- Adapter: `github.com/quells-bot/ddb-sqlite-core/awsdynamodb` (go 1.26.5, AWS SDK v2 + `ory/dockertest` for the dynamodb-local target; uses a `replace` directive pointing the root module at `..`)
+- Root: `github.com/quells-bot/ddb-sqlite` (go 1.25, no AWS SDK)
+- Adapter: `github.com/quells-bot/ddb-sqlite/awsdynamodb` (go 1.26.5, AWS SDK v2 + `ory/dockertest` for the dynamodb-local target; uses a `replace` directive pointing the root module at `..`)
 
 ## Code Conventions & Common Patterns
 
@@ -163,7 +163,7 @@ Two Go modules must be built/tested independently:
 - **Go toolchain**: root module `go 1.25`; adapter module `go 1.26.5`. Both must build.
 - **SQLite driver**: `modernc.org/sqlite` (CGO-free), imported for side-effect registration in `internal/storage/store.go`. **`CGO_ENABLED=0` is the intent** — do not introduce CGO deps.
 - **No AWS SDK in the root module.** The SDK (`aws-sdk-go-v2`) lives only in `awsdynamodb/go.mod`. If adding a package that needs SDK types, it belongs in `awsdynamodb/`, not the root.
-- **Two modules**: run `go` commands in the right directory. The adapter module uses `replace github.com/quells-bot/ddb-sqlite-core => ..`.
+- **Two modules**: run `go` commands in the right directory. The adapter module uses `replace github.com/quells-bot/ddb-sqlite => ..`.
 - **dynamodb-local via podman**: the conformance suite's local target expects a rootless podman socket (`systemctl --user start podman.socket`); `DOCKER_HOST` is auto-set to the podman socket if unset. Image `amazon/dynamodb-local:3.3.1`. Falls back to `DDBSQLITE_CONF_LOCAL_ENDPOINT`.
 - **No package manager / no Bun / no Node.** Pure Go project.
 
@@ -183,20 +183,6 @@ Two Go modules must be built/tested independently:
 
 ## Implementation Status (Milestones)
 
-The project follows a walking-skeleton-then-widen plan (see the spec §11). Currently implemented:
-
-- **M0** — `num`, `attrval`.
-- **M1** — `storage`; `ddb` table ops + basic item ops; `awsdynamodb` adapter; conformance harness.
-- **M2** — `internal/expr` in full (condition/filter and update expressions); `ConditionExpression` + `ReturnValues` on `PutItem`/`DeleteItem`; `UpdateItem` with upsert, key immutability, and all five `ReturnValues` modes; `attrval.SetPath`/`RemovePath`; `num.Add`/`Sub`.
-- **M3** — `Query`/`Scan` with faithful pagination — SQLite partition-seek + sort-key range narrowing, `ScanIndexForward`, `Limit` as a read budget applied before `FilterExpression` with `ScannedCount`/`Count`, `ExclusiveStartKey`/`LastEvaluatedKey`, parallel-scan `Segment`/`TotalSegments`.
-- **M4** — GSI support — write-triggered sparse index maintenance, GSI `Query`/`Scan`, read-time projection for `KEYS_ONLY`/`INCLUDE`/`ALL`, `Select`.
-- **M5** (complete) —
-  - **M5a** TTL — `UpdateTimeToLive`/`DescribeTimeToLive`; `ExpireExpired` engine extension; injectable `Options.Now` clock; removal of the `ttl INTEGER` data-table column; `storage.UpdateTableTTL`/`storage.ExpireExpired`.
-  - **M5b** batch ops — `BatchWriteItem`/`BatchGetItem`: one atomic tx per batch, pre-validate-then-apply, 25/100 count limits, duplicate-key rejection via canonical wire JSON, BatchGetItem 16MiB response cap enforced with `UnprocessedKeys` spill (M6c W6), no TTL read filtering; BatchGetItem deterministically sorts each table's responses by primary key ascending and includes an empty per-table `Responses` entry for all-miss tables (both documented divergences).
-- **M6a** — `UpdateTable`.
-- **M6b** — projection expressions — `ProjectionExpression` honored on GetItem/Query/Scan/BatchGetItem, full `Select` model, GSI projected-attribute restriction.
-- **M6c** (hardening sweep, complete — **M6 done**) — W1 (AWS-faithful item-size accounting replacing the JSON proxy), W2 (expression limits), W3 (naming & key validation), W4 (nested `INCLUDE` — matches reference, no change), W5 (`DescribeTable` `ItemCount`/`TableSizeBytes` + per-GSI reporting), W6 (BatchGetItem 16MiB response cap with `UnprocessedKeys` spill), W7 (legacy-field rejection audit — all deprecated API fields rejected, rejection matrix pinned with adapter-only unit tests), W8 (golden-corpus audit — nine dual-target pins incl. two fixes: UpdateTable error precedence, `expr.Bind` ordering-operand type validation), and W9 (fuzz pass — `FuzzItemSize`, `FuzzProject`, `FuzzAddSub`, boundary-biased expr parser seeds) implemented.
-
-When extending, check the spec's milestone list and prefer the conformance harness as the validation target.
+The project follows a walking-skeleton-then-widen plan (see the spec §11). Currently implemented: **M0** (`num`, `attrval`), **M1** (`storage`, `ddb` table ops + basic item ops, `awsdynamodb` adapter, conformance harness), **M2** (`internal/expr` in full — condition/filter and update expressions; `ConditionExpression` + `ReturnValues` on `PutItem`/`DeleteItem`; `UpdateItem` with upsert, key immutability, and all five `ReturnValues` modes; `attrval.SetPath`/`RemovePath`; `num.Add`/`Sub`), **M3** (`Query`/`Scan` with faithful pagination — SQLite partition-seek + sort-key range narrowing, `ScanIndexForward`, `Limit` as a read budget applied before `FilterExpression` with `ScannedCount`/`Count`, `ExclusiveStartKey`/`LastEvaluatedKey`, parallel-scan `Segment`/`TotalSegments`), and **M4** (GSI support — write-triggered sparse index maintenance, GSI `Query`/`Scan`, read-time projection for `KEYS_ONLY`/`INCLUDE`/`ALL`, `Select`), and **M5** (complete) — **M5a** TTL (`UpdateTimeToLive`/`DescribeTimeToLive`; `ExpireExpired` engine extension; injectable `Options.Now` clock; removal of the `ttl INTEGER` data-table column; `storage.UpdateTableTTL`/`storage.ExpireExpired`) and **M5b** batch ops (`BatchWriteItem`/`BatchGetItem` — one atomic tx per batch, pre-validate-then-apply, 25/100 count limits, duplicate-key rejection via canonical wire JSON, no 16MB enforcement, no TTL read filtering; BatchGetItem deterministically sorts each table's responses by primary key ascending and includes an empty per-table `Responses` entry for all-miss tables — both documented divergences), **M6a** (UpdateTable), and **M6b** (projection expressions — `ProjectionExpression` honored on GetItem/Query/Scan/BatchGetItem, full `Select` model, GSI projected-attribute restriction). **Not yet present**: M6 hardening sweep. When extending, check the spec's milestone list and prefer the conformance harness as the validation target.
 
 **Known divergences from real DynamoDB** are captured as RED conformance cases — while any are open, keep them in a dedicated `awsdynamodb/conformance_divergence_test.go` where they pass against `dynamodb-local` and fail against the adapter until fixed. Once a case goes green on both targets, move it into `conformance_test.go`. All M2–M4 divergences are resolved and migrated (`conformance_divergence_test.go` has been retired), so `go test ./...` in `awsdynamodb/` is green on the default target.

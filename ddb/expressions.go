@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/quells-bot/ddb-sqlite-core/attrval"
-	"github.com/quells-bot/ddb-sqlite-core/internal/expr"
+	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite/internal/expr"
 )
 
 // ReturnValues modes. PutItem and DeleteItem accept NONE and ALL_OLD only;

@@ -3,7 +3,7 @@ package expr
 import (
 	"fmt"
 
-	"github.com/quells-bot/ddb-sqlite-core/attrval"
+	"github.com/quells-bot/ddb-sqlite/attrval"
 )
 
 // Projection is a parsed projection expression: a comma-separated list of
@@ -73,9 +73,6 @@ func (b *BoundProjection) Paths() []attrval.Path {
 // ("obj, obj.a"). Overlap can only be computed after binding, because two
 // different aliases may resolve to the same attribute name.
 func (p *Projection) Bind(env Env) (*BoundProjection, error) {
-	if err := checkSubstitutionLimits(env); err != nil {
-		return nil, err
-	}
 	b := binder{env: env}
 	out := &BoundProjection{paths: make([]attrval.Path, 0, len(p.paths))}
 	for _, po := range p.paths {

@@ -348,7 +348,7 @@ Applied in Go after fetching the full blob, per parent spec §3.4(4). The set of
 
 - `ALL`: all attributes (no trimming).
 - `KEYS_ONLY`: GSI key attrs + table key attrs.
-- `INCLUDE`: GSI keys + table keys + `NonKeyAttributes` (attrs absent from the item are omitted — probe G8; no null padding). Nested path entries (e.g. `obj.a`) are accepted at `CreateTable` but never projected — the keep set is top-level names, so a literal `obj.a` matches no item attribute; M6c W4 (P-include, 2026-08-03) confirmed dynamodb-local behaves identically, so this matches the reference and is not a divergence.
+- `INCLUDE`: GSI keys + table keys + `NonKeyAttributes` (attrs absent from the item are omitted — probe G8; no null padding).
 - `Select=COUNT`: items dropped (counts/LEK retained).
 - `Select=ALL_PROJECTED_ATTRIBUTES`: trims to the GSI's projection (same as the default GSI behavior for ALL/KEYS_ONLY/INCLUDE).
 
@@ -561,7 +561,7 @@ go vet ./... && (cd awsdynamodb && go vet ./...)              # both module dire
 | GSI `ExclusiveStartKey` validation | Exactly the table∪GSI key-attr union (deduped on overlap); missing/extra → `ErrValidation` (probe G25). Not the base-table `validateKey` |
 | GSI `range` column | NOT NULL when present (both-present rule makes NULL unreachable) |
 | Duplicate `AttributeDefinition` | Rejected (probe G27); fixes M1's silent dedup |
-| GSI IndexName validation | 3–255 chars, `[a-zA-Z0-9_.-]` (probe G27); the equivalent table-name rule stays M6 — resolved by M6c W3 (2026-08-03): CreateTable enforces 3–255 [A-Za-z0-9_.-]+ via the generalized validName helper. |
+| GSI IndexName validation | 3–255 chars, `[a-zA-Z0-9_.-]` (probe G27); the equivalent table-name rule stays M6 |
 | GSI key immutability | Not immutable (unlike table keys); UpdateItem can change GSI keys (probe G16) |
 | GSI Scan parallel segments | `TotalSegments > 1` on GSI Scan rejected in M4 (scope cut) |
 | Probe disposal | `gsi_probe_test.go` deleted once conformance cases ported |

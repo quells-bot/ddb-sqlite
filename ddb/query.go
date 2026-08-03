@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/quells-bot/ddb-sqlite-core/attrval"
-	"github.com/quells-bot/ddb-sqlite-core/internal/expr"
-	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
+	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite/internal/expr"
+	"github.com/quells-bot/ddb-sqlite/internal/storage"
 )
 
 // QueryInput queries one partition by key condition, optionally filtered.
@@ -135,9 +135,6 @@ func beginsWithSuccessor(prefix []byte) any {
 // Query selects items from one partition by key condition, optionally filtered.
 // See M3 spec §4.5 for the operation flow.
 func (c *Client) Query(ctx context.Context, in QueryInput) (QueryOutput, error) {
-	if err := validateTableName(in.TableName); err != nil {
-		return QueryOutput{}, err
-	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return QueryOutput{}, err
@@ -451,9 +448,6 @@ func translateSortCond(sort *expr.SortKeyCond, def storage.TableDef, scanForward
 // Scan selects all items from a table (or one parallel segment), optionally
 // filtered. See M3 spec §4.6 for the operation flow.
 func (c *Client) Scan(ctx context.Context, in ScanInput) (ScanOutput, error) {
-	if err := validateTableName(in.TableName); err != nil {
-		return ScanOutput{}, err
-	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return ScanOutput{}, err

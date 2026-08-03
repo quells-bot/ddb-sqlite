@@ -255,11 +255,11 @@ New rules (all probe-verified, table in §2.3):
 | `SPECIFIC_ATTRIBUTES` | yes | — | accepted |
 | `SPECIFIC_ATTRIBUTES` | no | — | rejected (needs projection) |
 
-### 4.7 Nested `INCLUDE` attributes (accepted, never projected — matches reference)
+### 4.7 Nested `INCLUDE` attributes (known gap, not fixed here)
 
 The engine has accepted nested paths in `Projection.NonKeyAttributes` at `CreateTable` since M4 (mirroring dynamodb-local's laxness — the reference accepted `["top", "obj.a"]` in the probe fixture; real AWS documents top-level names only). They do not actually work: the M4 read-time trim (`gsiProjectionAttrs`) keeps a literal top-level `"obj.a"`, a name no item carries, so the attribute is silently dropped from GSI reads.
 
-M6B keeps that behavior and makes the restriction check consistent with it: the §4.3-step-5 projected-attr set contains **top-level names only** — a nested entry like `obj.a` contributes nothing, so projecting `obj` or `obj.a` on such an index is rejected with "does not project". M6c W4 (probe P-include, 2026-08-03) confirmed dynamodb-local behaves identically — accepts `NonKeyAttributes: ["obj.a"]` at `CreateTable`, accepts the write, and never projects the nested entry — so the engine matches the reference and there is no divergence; `TestConfGSINestedInclude` pins this dual-target. Conformance fixtures otherwise use top-level `INCLUDE` attrs only.
+M6B keeps that behavior and makes the restriction check consistent with it: the §4.3-step-5 projected-attr set contains **top-level names only** — a nested entry like `obj.a` contributes nothing, so projecting `obj` or `obj.a` on such an index is rejected with "does not project". That is self-consistent (the index genuinely does not project it) but may diverge from the reference; conformance fixtures therefore use top-level `INCLUDE` attrs only, and closing the gap (reject nested entries at `CreateTable`, or implement nested projection) is deferred (§8).
 
 ## 5. Adapter (`awsdynamodb`)
 
@@ -353,7 +353,7 @@ Note: three committed probes encode the superseded initial-draft assumptions and
 ## 8. Scope boundaries (out of scope for M6B)
 
 - `TransactGetItems` (v1 non-goal, parent spec §8).
-- Nested `INCLUDE` `NonKeyAttributes` — accepted at `CreateTable` but never projected (pre-existing M4 gap); M6B only makes the GSI restriction check consistent with that reality (§4.7). Rejecting them at `CreateTable` or implementing nested projection is deferred. — resolved by M6c W4 (2026-08-03): P-include confirmed dynamodb-local also accepts nested entries at CreateTable but never projects them; engine behavior matches the reference, no divergence, deferral closed.
+- Nested `INCLUDE` `NonKeyAttributes` — accepted at `CreateTable` but never projected (pre-existing M4 gap); M6B only makes the GSI restriction check consistent with that reality (§4.7). Rejecting them at `CreateTable` or implementing nested projection is deferred.
 - `ProjectionExpression` on write operations (`PutItem`/`UpdateItem`/`DeleteItem`/`BatchWriteItem`) — these do not return items (except via `ReturnValues`, which is a separate projection mechanism already implemented in M2).
 - Expression length / path-count caps (M6 hardening).
 - Full item-size accounting (M6 hardening).

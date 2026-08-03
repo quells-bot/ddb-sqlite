@@ -14,8 +14,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
 
-	"github.com/quells-bot/ddb-sqlite-core/attrval"
-	"github.com/quells-bot/ddb-sqlite-core/ddb"
+	"github.com/quells-bot/ddb-sqlite/attrval"
+	"github.com/quells-bot/ddb-sqlite/ddb"
 )
 
 // Adapter implements the supported subset of the SDK's DynamoDBAPI methods
@@ -431,12 +431,10 @@ func toSDKTableDescription(d ddb.TableDescription) *types.TableDescription {
 			gd.KeySchema = append(gd.KeySchema, types.KeySchemaElement{AttributeName: aws.String(k.AttributeName), KeyType: kt})
 		}
 		gd.Projection = &types.Projection{ProjectionType: types.ProjectionType(g.Projection.Type), NonKeyAttributes: g.Projection.NonKeyAttributes}
-		gd.ItemCount = aws.Int64(g.ItemCount)
-		gd.IndexSizeBytes = aws.Int64(g.IndexSizeBytes)
+		gd.ItemCount = aws.Int64(0)
+		gd.IndexSizeBytes = aws.Int64(0)
 		td.GlobalSecondaryIndexes = append(td.GlobalSecondaryIndexes, gd)
 	}
-	td.ItemCount = aws.Int64(d.ItemCount)
-	td.TableSizeBytes = aws.Int64(d.TableSizeBytes)
 	return td
 }
 
@@ -569,28 +567,7 @@ func (a *Adapter) BatchGetItem(ctx context.Context, params *dynamodb.BatchGetIte
 			res.Responses[table] = list
 		}
 	}
-	// 16MiB response-cap spill (M6c W6): echo each spilled table's
-	// KeysAndAttributes with only the unprocessed keys.
-	if len(out.UnprocessedKeys) > 0 {
-		res.UnprocessedKeys = make(map[string]types.KeysAndAttributes, len(out.UnprocessedKeys))
-		for table, ka := range out.UnprocessedKeys {
-			keys := make([]map[string]types.AttributeValue, 0, len(ka.Keys))
-			for _, k := range ka.Keys {
-				keys = append(keys, ToSDKMap(k))
-			}
-			echo := types.KeysAndAttributes{Keys: keys}
-			if ka.ConsistentRead {
-				echo.ConsistentRead = aws.Bool(true)
-			}
-			if ka.ProjectionExpression != "" {
-				echo.ProjectionExpression = aws.String(ka.ProjectionExpression)
-			}
-			if len(ka.ExpressionAttributeNames) > 0 {
-				echo.ExpressionAttributeNames = ka.ExpressionAttributeNames
-			}
-			res.UnprocessedKeys[table] = echo
-		}
-	}
+	// v1: UnprocessedKeys is always empty (no throttling).
 	return res, nil
 }
 
@@ -639,12 +616,15 @@ func ignoredFieldsPresent(p *dynamodb.UpdateTableInput) bool {
 }
 
 // UpdateTable translates SDK UpdateTableInput to the engine. It validates the
-// structural limits the engine cannot see (>1 GSI update entry, a GSI
-// throughput Update combined with any other operation), drops ignored
+// structural limits the engine cannot see (empty name, >1 GSI update entry, a
+// GSI throughput Update combined with any other operation), drops ignored
 // fields into NonGsiFieldsPresent, and routes each Create/Delete action to a
 // core union entry. A lone Update action is accepted-and-ignored (no core
 // entry). mapError is the single error-mapping point.
 func (a *Adapter) UpdateTable(ctx context.Context, params *dynamodb.UpdateTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateTableOutput, error) {
+	if aws.ToString(params.TableName) == "" {
+		return nil, mapError(fmt.Errorf("%w: table name is empty", ddb.ErrValidation))
+	}
 	if len(params.GlobalSecondaryIndexUpdates) > 1 {
 		return nil, mapError(fmt.Errorf("%w: at most one GlobalSecondaryIndexUpdates entry per UpdateTable", ddb.ErrValidation))
 	}

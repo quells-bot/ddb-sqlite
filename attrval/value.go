@@ -9,7 +9,7 @@ package attrval
 import (
 	"fmt"
 
-	"github.com/quells-bot/ddb-sqlite-core/internal/num"
+	"github.com/quells-bot/ddb-sqlite/internal/num"
 )
 
 // Tag identifies the DynamoDB type of a Value.

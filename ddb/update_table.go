@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
+	"github.com/quells-bot/ddb-sqlite/internal/storage"
 )
 
 // validateUpdateTableShape enforces request-shape rules 2–6 (rule 1, table
@@ -56,7 +56,7 @@ func validateCreateGsi(def storage.TableDef, in UpdateTableInput) (storage.GsiDe
 	g := in.GlobalSecondaryIndexUpdates[0].Create
 
 	// Valid GSI name.
-	if !validName(g.IndexName) {
+	if !validGsiName(g.IndexName) {
 		return storage.GsiDef{}, fmt.Errorf("%w: invalid index name %q: must be 3-255 chars of [a-zA-Z0-9_.-]", ErrValidation, g.IndexName)
 	}
 
@@ -101,37 +101,13 @@ func validateCreateGsi(def storage.TableDef, in UpdateTableInput) (storage.GsiDe
 		types[ad.AttributeName] = ad.AttributeType
 	}
 
-	// Name already in use. Checked before key-schema validation: dynamodb-local
-	// surfaces the existing-index error over schema errors (M6c W8, P-misc).
-	for _, ex := range def.GSIs {
-		if ex.Name == g.IndexName {
-			return storage.GsiDef{}, fmt.Errorf("%w: index %q already exists", ErrGsiInUse, g.IndexName)
-		}
-	}
-
 	// Key schema + projection reuse the existing validators.
 	gh, gr, ght, grt, err := validateGsiKeySchema(g.KeySchema, types)
 	if err != nil {
 		return storage.GsiDef{}, err
 	}
-	if err := validateIndexAttrName(gh); err != nil {
-		return storage.GsiDef{}, err
-	}
-	if gr != "" {
-		if err := validateIndexAttrName(gr); err != nil {
-			return storage.GsiDef{}, err
-		}
-	}
 	if err := validateProjection(g.Projection, gh, gr, def.Hash, def.Range); err != nil {
 		return storage.GsiDef{}, err
-	}
-
-	projSum := len(g.Projection.NonKeyAttributes)
-	for _, ex := range def.GSIs {
-		projSum += len(ex.Projected)
-	}
-	if projSum > maxProjectedAttrsPerTable {
-		return storage.GsiDef{}, fmt.Errorf("%w: total projected attributes across all secondary indexes exceeds %d", ErrValidation, maxProjectedAttrsPerTable)
 	}
 
 	// Surplus attrs: every input AttributeDefinition not already declared must be
@@ -147,6 +123,13 @@ func validateCreateGsi(def storage.TableDef, in UpdateTableInput) (storage.GsiDe
 		}
 		if !newKeyAttrs[ad.AttributeName] {
 			return storage.GsiDef{}, fmt.Errorf("%w: AttributeDefinition %q is not used by the new index key schema", ErrValidation, ad.AttributeName)
+		}
+	}
+
+	// Name already in use.
+	for _, ex := range def.GSIs {
+		if ex.Name == g.IndexName {
+			return storage.GsiDef{}, fmt.Errorf("%w: index %q already exists", ErrGsiInUse, g.IndexName)
 		}
 	}
 
@@ -173,9 +156,6 @@ func validateCreateGsi(def storage.TableDef, in UpdateTableInput) (storage.GsiDe
 // At most one GlobalSecondaryIndexUpdates entry is allowed (AWS: one operation
 // per call). All work runs on one *sql.Tx; a failure rolls the whole call back.
 func (c *Client) UpdateTable(ctx context.Context, in UpdateTableInput) (UpdateTableOutput, error) {
-	if err := validateTableName(in.TableName); err != nil {
-		return UpdateTableOutput{}, err
-	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return UpdateTableOutput{}, err
@@ -239,14 +219,10 @@ func (c *Client) UpdateTable(ctx context.Context, in UpdateTableInput) (UpdateTa
 	if err != nil {
 		return UpdateTableOutput{}, err
 	}
-	td, err := c.describe(tx, in.TableName, reloaded, creationTimeFromMeta(reloaded.Meta))
-	if err != nil {
-		return UpdateTableOutput{}, err
-	}
 	if err := tx.Commit(); err != nil {
 		return UpdateTableOutput{}, err
 	}
-	return UpdateTableOutput{TableDescription: td}, nil
+	return UpdateTableOutput{TableDescription: describeFromDef(in.TableName, reloaded, creationTimeFromMeta(reloaded.Meta))}, nil
 }
 
 // backfillGsi scans every data row, decodes the item, and upserts a GSI index
@@ -276,8 +252,7 @@ func (c *Client) backfillGsi(tx *sql.Tx, def storage.TableDef, gd storage.GsiDef
 		if !ok {
 			continue
 		}
-		size, _ := itemSize(item)
-		if err := c.store.UpsertGsiRow(tx, def.Name, gd.Name, id, hv, rv, size); err != nil {
+		if err := c.store.UpsertGsiRow(tx, def.Name, gd.Name, id, hv, rv); err != nil {
 			return err
 		}
 	}

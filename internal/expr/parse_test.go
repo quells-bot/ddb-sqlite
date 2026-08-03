@@ -296,31 +296,31 @@ func TestParseUpdateErrors(t *testing.T) {
 // parsePrimary, once per level. Without a cap, a deep enough expression
 // overflows the goroutine stack — a fatal error that no recover can catch and
 // that takes the whole process down. The cap turns that into a syntax error.
-//
-// Expressions must stay under the 4KB size limit (maxExprString) to exercise
-// this recursion cap; at 600 levels these fixtures are ~2.4KB / ~1.2KB (under
-// 4096 bytes) yet exceed maxParseDepth (500). Operator-per-level OR nesting
-// costs ~12 bytes/level and so cannot exceed 500 levels within 4KB — the size
-// limit catches it first, which TestExprStringLimit covers.
 func TestParseConditionRejectsPathologicalNesting(t *testing.T) {
 	cases := []struct {
 		name string
 		src  string
 	}{
 		{
+			// Structurally meaningful nesting: one operator per level, so this
+			// is not merely redundant parentheses.
+			name: "nested parens",
+			src:  strings.Repeat("a = :v OR (", 100000) + "a = :v" + strings.Repeat(")", 100000),
+		},
+		{
 			name: "chained NOT",
-			src:  strings.Repeat("NOT ", 600) + "a = :v",
+			src:  strings.Repeat("NOT ", 100000) + "a = :v",
 		},
 		{
 			name: "bare parens",
-			src:  strings.Repeat("(", 600) + "a = :v" + strings.Repeat(")", 600),
+			src:  strings.Repeat("(", 100000) + "a = :v" + strings.Repeat(")", 100000),
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := ParseCondition(tc.src)
 			if !errors.Is(err, ErrSyntax) {
-				t.Errorf("ParseCondition(%s, 600 levels) err = %v, want ErrSyntax", tc.name, err)
+				t.Errorf("ParseCondition(%s, 100000 levels) err = %v, want ErrSyntax", tc.name, err)
 			}
 		})
 	}
