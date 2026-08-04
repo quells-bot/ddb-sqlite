@@ -116,13 +116,13 @@ func gsiIndexKey(item Item, g storage.GsiDef) (hashVal, rangeVal any, indexable 
 // path runs validateGsiKeys before the storage write so a rejected write stays
 // atomic and surfaces AWS-shaped error messages; this function only indexes
 // items validateGsiKeys already accepted (indexable==true there).
-func (c *Client) maintainGsiRows(tx *sql.Tx, table string, gsis []storage.GsiDef, dataID int64, item Item) error {
+func (c *Client) maintainGsiRows(tx *sql.Tx, table string, gsis []storage.GsiDef, dataID int64, item Item, size int64) error {
 	for _, g := range gsis {
 		hv, rv, ok := gsiIndexKey(item, g)
 		if !ok {
 			continue
 		}
-		if err := c.store.UpsertGsiRow(tx, table, g.Name, dataID, hv, rv); err != nil {
+		if err := c.store.UpsertGsiRow(tx, table, g.Name, dataID, hv, rv, size); err != nil {
 			return err
 		}
 	}

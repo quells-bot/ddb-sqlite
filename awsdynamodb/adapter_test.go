@@ -3,6 +3,8 @@ package awsdynamodb_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -97,11 +99,11 @@ func TestAdapterGetItemMissingKey(t *testing.T) {
 	ctx := context.Background()
 	a := adapterClient(t)
 	a.CreateTable(ctx, &dynamodb.CreateTableInput{
-		TableName:            aws.String("T"),
+		TableName:            aws.String("Tbl"),
 		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
 		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
 	})
-	got, err := a.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("T"), Key: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "nope"}}})
+	got, err := a.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("Tbl"), Key: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "nope"}}})
 	if err != nil {
 		t.Fatalf("GetItem: %v", err)
 	}
@@ -117,13 +119,13 @@ func TestAdapterRejectsLegacyParameters(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer a.Close()
-	mustAdapterTable(t, a, ctx, "T")
+	mustAdapterTable(t, a, ctx, "Tbl")
 
 	item := map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k"}}
 
 	t.Run("PutItem Expected", func(t *testing.T) {
 		_, err := a.PutItem(ctx, &dynamodb.PutItemInput{
-			TableName: aws.String("T"),
+			TableName: aws.String("Tbl"),
 			Item:      item,
 			Expected:  map[string]types.ExpectedAttributeValue{"v": {Exists: aws.Bool(false)}},
 		})
@@ -132,7 +134,7 @@ func TestAdapterRejectsLegacyParameters(t *testing.T) {
 
 	t.Run("PutItem ConditionalOperator", func(t *testing.T) {
 		_, err := a.PutItem(ctx, &dynamodb.PutItemInput{
-			TableName:           aws.String("T"),
+			TableName:           aws.String("Tbl"),
 			Item:                item,
 			ConditionalOperator: types.ConditionalOperatorAnd,
 		})
@@ -141,9 +143,18 @@ func TestAdapterRejectsLegacyParameters(t *testing.T) {
 
 	t.Run("DeleteItem Expected", func(t *testing.T) {
 		_, err := a.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-			TableName: aws.String("T"),
+			TableName: aws.String("Tbl"),
 			Key:       item,
 			Expected:  map[string]types.ExpectedAttributeValue{"v": {Exists: aws.Bool(false)}},
+		})
+		assertValidation(t, err)
+	})
+
+	t.Run("DeleteItem ConditionalOperator", func(t *testing.T) {
+		_, err := a.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+			TableName:           aws.String("Tbl"),
+			Key:                 item,
+			ConditionalOperator: types.ConditionalOperatorAnd,
 		})
 		assertValidation(t, err)
 	})
@@ -156,10 +167,10 @@ func TestAdapterRejectsEmptyConditionExpression(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer a.Close()
-	mustAdapterTable(t, a, ctx, "T")
+	mustAdapterTable(t, a, ctx, "Tbl")
 
 	_, err = a.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName:           aws.String("T"),
+		TableName:           aws.String("Tbl"),
 		Item:                map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k"}},
 		ConditionExpression: aws.String(""),
 	})
@@ -173,10 +184,10 @@ func TestAdapterConditionalCheckFailedCarriesItem(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer a.Close()
-	mustAdapterTable(t, a, ctx, "T")
+	mustAdapterTable(t, a, ctx, "Tbl")
 
 	if _, err := a.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String("T"),
+		TableName: aws.String("Tbl"),
 		Item: map[string]types.AttributeValue{
 			"pk": &types.AttributeValueMemberS{Value: "k"},
 			"v":  &types.AttributeValueMemberS{Value: "first"},
@@ -186,7 +197,7 @@ func TestAdapterConditionalCheckFailedCarriesItem(t *testing.T) {
 	}
 
 	_, err = a.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName:                           aws.String("T"),
+		TableName:                           aws.String("Tbl"),
 		Item:                                map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k"}},
 		ConditionExpression:                 aws.String("attribute_not_exists(pk)"),
 		ReturnValuesOnConditionCheckFailure: types.ReturnValuesOnConditionCheckFailureAllOld,
@@ -221,7 +232,7 @@ func assertValidation(t *testing.T, err error) {
 	}
 }
 
-// newAdapterTable opens an adapter and creates a single-key table "T".
+// newAdapterTable opens an adapter and creates a single-key table "Tbl".
 // adapterClient is the existing helper in this file; table creation is inline
 // elsewhere, so this wrapper is new.
 func newAdapterTable(t *testing.T) (*awsdynamodb.Adapter, context.Context) {
@@ -229,7 +240,7 @@ func newAdapterTable(t *testing.T) (*awsdynamodb.Adapter, context.Context) {
 	a := adapterClient(t)
 	ctx := context.Background()
 	if _, err := a.CreateTable(ctx, &dynamodb.CreateTableInput{
-		TableName:            aws.String("T"),
+		TableName:            aws.String("Tbl"),
 		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
 		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
 	}); err != nil {
@@ -242,7 +253,7 @@ func TestAdapterUpdateItem(t *testing.T) {
 	a, ctx := newAdapterTable(t)
 
 	out, err := a.UpdateItem(ctx, &dynamodb.UpdateItemInput{
-		TableName:                 aws.String("T"),
+		TableName:                 aws.String("Tbl"),
 		Key:                       map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k"}},
 		UpdateExpression:          aws.String("SET s = :s"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{":s": &types.AttributeValueMemberS{Value: "v"}},
@@ -270,7 +281,7 @@ func TestAdapterUpdateItemRejections(t *testing.T) {
 		{
 			"legacy AttributeUpdates",
 			&dynamodb.UpdateItemInput{
-				TableName:        aws.String("T"),
+				TableName:        aws.String("Tbl"),
 				Key:              key,
 				AttributeUpdates: map[string]types.AttributeValueUpdate{"s": {Action: types.AttributeActionPut, Value: &types.AttributeValueMemberS{Value: "v"}}},
 			},
@@ -278,7 +289,7 @@ func TestAdapterUpdateItemRejections(t *testing.T) {
 		{
 			"legacy Expected",
 			&dynamodb.UpdateItemInput{
-				TableName: aws.String("T"),
+				TableName: aws.String("Tbl"),
 				Key:       key,
 				Expected:  map[string]types.ExpectedAttributeValue{"s": {Exists: aws.Bool(false)}},
 			},
@@ -286,18 +297,18 @@ func TestAdapterUpdateItemRejections(t *testing.T) {
 		{
 			"legacy ConditionalOperator",
 			&dynamodb.UpdateItemInput{
-				TableName:           aws.String("T"),
+				TableName:           aws.String("Tbl"),
 				Key:                 key,
 				ConditionalOperator: types.ConditionalOperatorAnd,
 			},
 		},
 		{
 			"present-but-empty UpdateExpression",
-			&dynamodb.UpdateItemInput{TableName: aws.String("T"), Key: key, UpdateExpression: aws.String("")},
+			&dynamodb.UpdateItemInput{TableName: aws.String("Tbl"), Key: key, UpdateExpression: aws.String("")},
 		},
 		{
 			"present-but-empty ConditionExpression",
-			&dynamodb.UpdateItemInput{TableName: aws.String("T"), Key: key, ConditionExpression: aws.String("")},
+			&dynamodb.UpdateItemInput{TableName: aws.String("Tbl"), Key: key, ConditionExpression: aws.String("")},
 		},
 	}
 	for _, tc := range cases {
@@ -315,14 +326,14 @@ func TestAdapterUpdateTimeToLive(t *testing.T) {
 	ctx := context.Background()
 	a := adapterClient(t)
 	a.CreateTable(ctx, &dynamodb.CreateTableInput{
-		TableName:            aws.String("T"),
+		TableName:            aws.String("Tbl"),
 		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
 		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
 	})
 
 	// Enable -> echoed spec.
 	out, err := a.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
-		TableName:               aws.String("T"),
+		TableName:               aws.String("Tbl"),
 		TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(true), AttributeName: aws.String("expire")},
 	})
 	if err != nil {
@@ -333,7 +344,7 @@ func TestAdapterUpdateTimeToLive(t *testing.T) {
 	}
 
 	// Describe reflects ENABLED.
-	desc, err := a.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("T")})
+	desc, err := a.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("Tbl")})
 	if err != nil {
 		t.Fatalf("describe: %v", err)
 	}
@@ -346,10 +357,10 @@ func TestAdapterUpdateTimeToLive(t *testing.T) {
 
 	// Disable -> DISABLED, nil AttributeName.
 	a.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
-		TableName:               aws.String("T"),
+		TableName:               aws.String("Tbl"),
 		TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(false), AttributeName: aws.String("expire")},
 	})
-	desc, _ = a.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("T")})
+	desc, _ = a.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("Tbl")})
 	if desc.TimeToLiveDescription.TimeToLiveStatus != types.TimeToLiveStatusDisabled {
 		t.Errorf("after disable: status = %v, want DISABLED", desc.TimeToLiveDescription.TimeToLiveStatus)
 	}
@@ -368,7 +379,7 @@ func TestAdapterUpdateTimeToLive(t *testing.T) {
 	}
 
 	// nil spec -> ValidationException.
-	_, err = a.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{TableName: aws.String("T")})
+	_, err = a.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{TableName: aws.String("Tbl")})
 	var ae smithy.APIError
 	if !errors.As(err, &ae) || ae.ErrorCode() != "ValidationException" {
 		t.Errorf("nil spec: err = %v, want ValidationException", err)
@@ -376,7 +387,7 @@ func TestAdapterUpdateTimeToLive(t *testing.T) {
 
 	// nil Enabled treated as false (disable path); nil AttributeName -> engine ValidationException.
 	_, err = a.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
-		TableName:               aws.String("T"),
+		TableName:               aws.String("Tbl"),
 		TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: nil, AttributeName: nil},
 	})
 	if !errors.As(err, &ae) || ae.ErrorCode() != "ValidationException" {
@@ -388,13 +399,13 @@ func TestAdapterDescribeTimeToLive(t *testing.T) {
 	ctx := context.Background()
 	a := adapterClient(t)
 	a.CreateTable(ctx, &dynamodb.CreateTableInput{
-		TableName:            aws.String("T"),
+		TableName:            aws.String("Tbl"),
 		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
 		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
 	})
 
 	// Never configured -> DISABLED, nil AttributeName.
-	desc, err := a.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("T")})
+	desc, err := a.DescribeTimeToLive(ctx, &dynamodb.DescribeTimeToLiveInput{TableName: aws.String("Tbl")})
 	if err != nil {
 		t.Fatalf("describe: %v", err)
 	}
@@ -418,7 +429,7 @@ func TestAdapterBatchWriteGetRoundTrip(t *testing.T) {
 	a := adapterClient(t)
 
 	_, err := a.CreateTable(ctx, &dynamodb.CreateTableInput{
-		TableName:            aws.String("T"),
+		TableName:            aws.String("Tbl"),
 		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
 		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
 	})
@@ -427,7 +438,7 @@ func TestAdapterBatchWriteGetRoundTrip(t *testing.T) {
 	}
 
 	bw, err := a.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
-		"T": {
+		"Tbl": {
 			{PutRequest: &types.PutRequest{Item: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k1"}, "v": &types.AttributeValueMemberS{Value: "one"}}}},
 			{PutRequest: &types.PutRequest{Item: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k2"}}}},
 		},
@@ -440,7 +451,7 @@ func TestAdapterBatchWriteGetRoundTrip(t *testing.T) {
 	}
 
 	bg, err := a.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
-		"T": {Keys: []map[string]types.AttributeValue{
+		"Tbl": {Keys: []map[string]types.AttributeValue{
 			{"pk": &types.AttributeValueMemberS{Value: "k1"}},
 			{"pk": &types.AttributeValueMemberS{Value: "ghost"}},
 			{"pk": &types.AttributeValueMemberS{Value: "k2"}},
@@ -452,20 +463,20 @@ func TestAdapterBatchWriteGetRoundTrip(t *testing.T) {
 	if len(bg.UnprocessedKeys) != 0 {
 		t.Errorf("UnprocessedKeys = %v, want empty", bg.UnprocessedKeys)
 	}
-	if len(bg.Responses["T"]) != 2 {
-		t.Fatalf("len(Responses[T]) = %d, want 2", len(bg.Responses["T"]))
+	if len(bg.Responses["Tbl"]) != 2 {
+		t.Fatalf("len(Responses[T]) = %d, want 2", len(bg.Responses["Tbl"]))
 	}
-	if got := bg.Responses["T"][0]["v"].(*types.AttributeValueMemberS).Value; got != "one" {
+	if got := bg.Responses["Tbl"][0]["v"].(*types.AttributeValueMemberS).Value; got != "one" {
 		t.Errorf("Responses[T][0] v = %q, want one", got)
 	}
 
 	// Delete via batch, confirm gone.
 	if _, err := a.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{
-		"T": {{DeleteRequest: &types.DeleteRequest{Key: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k1"}}}}},
+		"Tbl": {{DeleteRequest: &types.DeleteRequest{Key: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k1"}}}}},
 	}}); err != nil {
 		t.Fatalf("BatchWriteItem delete: %v", err)
 	}
-	got, err := a.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("T"), Key: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k1"}}})
+	got, err := a.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("Tbl"), Key: map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k1"}}})
 	if err != nil {
 		t.Fatalf("GetItem: %v", err)
 	}
@@ -475,7 +486,7 @@ func TestAdapterBatchWriteGetRoundTrip(t *testing.T) {
 
 	// Engine validation flows through mapError: empty WriteRequest →
 	// ValidationException.
-	_, err = a.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{"T": {{}}}})
+	_, err = a.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{"Tbl": {{}}}})
 	var ae smithy.APIError
 	if !errors.As(err, &ae) || ae.ErrorCode() != "ValidationException" {
 		t.Errorf("empty WriteRequest: err = %v, want ValidationException", err)
@@ -489,10 +500,10 @@ func TestAdapterBatchWriteGetRoundTrip(t *testing.T) {
 func TestAdapterBatchGetAttributesToGetRejected(t *testing.T) {
 	ctx := context.Background()
 	a := adapterClient(t)
-	mustAdapterTable(t, a, ctx, "T")
+	mustAdapterTable(t, a, ctx, "Tbl")
 
 	_, err := a.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
-		"T": {
+		"Tbl": {
 			Keys:            []map[string]types.AttributeValue{{"pk": &types.AttributeValueMemberS{Value: "k"}}},
 			AttributesToGet: []string{"pk"},
 		},
@@ -508,7 +519,7 @@ func TestAdapterDescribeTableGsiStatuses(t *testing.T) {
 	a := adapterClient(t)
 	// Create a table with one GSI on gp.
 	if _, err := a.CreateTable(ctx, &dynamodb.CreateTableInput{
-		TableName: aws.String("T"),
+		TableName: aws.String("Tbl"),
 		KeySchema: []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
 		AttributeDefinitions: []types.AttributeDefinition{
 			{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
@@ -522,7 +533,7 @@ func TestAdapterDescribeTableGsiStatuses(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTable: %v", err)
 	}
-	out, err := a.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("T")})
+	out, err := a.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("Tbl")})
 	if err != nil {
 		t.Fatalf("DescribeTable: %v", err)
 	}
@@ -542,7 +553,7 @@ func TestAdapterUpdateTableCreateAndDelete(t *testing.T) {
 	a, ctx := newAdapterTable(t)
 	// Create GSI g1x on gp.
 	if _, err := a.UpdateTable(ctx, &dynamodb.UpdateTableInput{
-		TableName: aws.String("T"),
+		TableName: aws.String("Tbl"),
 		AttributeDefinitions: []types.AttributeDefinition{
 			{AttributeName: aws.String("gp"), AttributeType: types.ScalarAttributeTypeS},
 		},
@@ -556,7 +567,7 @@ func TestAdapterUpdateTableCreateAndDelete(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("UpdateTable create: %v", err)
 	}
-	desc, _ := a.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("T")})
+	desc, _ := a.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("Tbl")})
 	if len(desc.Table.GlobalSecondaryIndexes) != 1 {
 		t.Fatalf("GSIs = %d, want 1", len(desc.Table.GlobalSecondaryIndexes))
 	}
@@ -565,14 +576,14 @@ func TestAdapterUpdateTableCreateAndDelete(t *testing.T) {
 	}
 	// Delete it.
 	if _, err := a.UpdateTable(ctx, &dynamodb.UpdateTableInput{
-		TableName: aws.String("T"),
+		TableName: aws.String("Tbl"),
 		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
 			Delete: &types.DeleteGlobalSecondaryIndexAction{IndexName: aws.String("g1x")},
 		}},
 	}); err != nil {
 		t.Fatalf("UpdateTable delete: %v", err)
 	}
-	desc, _ = a.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("T")})
+	desc, _ = a.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("Tbl")})
 	if len(desc.Table.GlobalSecondaryIndexes) != 0 {
 		t.Errorf("after delete GSIs = %d, want 0", len(desc.Table.GlobalSecondaryIndexes))
 	}
@@ -581,7 +592,7 @@ func TestAdapterUpdateTableCreateAndDelete(t *testing.T) {
 func TestAdapterUpdateTableRejections(t *testing.T) {
 	ctx := context.Background()
 	a := adapterClient(t)
-	mustAdapterTable(t, a, ctx, "T")
+	mustAdapterTable(t, a, ctx, "Tbl")
 
 	// Empty table name.
 	_, err := a.UpdateTable(ctx, &dynamodb.UpdateTableInput{
@@ -593,7 +604,7 @@ func TestAdapterUpdateTableRejections(t *testing.T) {
 
 	// Two entries.
 	_, err = a.UpdateTable(ctx, &dynamodb.UpdateTableInput{
-		TableName: aws.String("T"),
+		TableName: aws.String("Tbl"),
 		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{
 			{Delete: &types.DeleteGlobalSecondaryIndexAction{IndexName: aws.String("g1x")}},
 			{Delete: &types.DeleteGlobalSecondaryIndexAction{IndexName: aws.String("g2x")}},
@@ -603,7 +614,7 @@ func TestAdapterUpdateTableRejections(t *testing.T) {
 
 	// GSI Update action + BillingMode (two operations).
 	_, err = a.UpdateTable(ctx, &dynamodb.UpdateTableInput{
-		TableName:   aws.String("T"),
+		TableName:   aws.String("Tbl"),
 		BillingMode: types.BillingModePayPerRequest,
 		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
 			Update: &types.UpdateGlobalSecondaryIndexAction{IndexName: aws.String("g1x")},
@@ -613,7 +624,7 @@ func TestAdapterUpdateTableRejections(t *testing.T) {
 
 	// Throughput-only no-op is accepted.
 	if _, err := a.UpdateTable(ctx, &dynamodb.UpdateTableInput{
-		TableName:   aws.String("T"),
+		TableName:   aws.String("Tbl"),
 		BillingMode: types.BillingModePayPerRequest,
 	}); err != nil {
 		t.Errorf("throughput-only: %v, want nil", err)
@@ -634,11 +645,11 @@ func assertTyped[T error](t *testing.T, err error, want string) {
 func TestAdapterUpdateTableErrorTypes(t *testing.T) {
 	ctx := context.Background()
 	a := adapterClient(t)
-	mustAdapterTable(t, a, ctx, "T")
+	mustAdapterTable(t, a, ctx, "Tbl")
 
 	// Seed: create g1x once (must succeed).
 	if _, err := a.UpdateTable(ctx, &dynamodb.UpdateTableInput{
-		TableName: aws.String("T"),
+		TableName: aws.String("Tbl"),
 		AttributeDefinitions: []types.AttributeDefinition{
 			{AttributeName: aws.String("gp"), AttributeType: types.ScalarAttributeTypeS},
 		},
@@ -654,7 +665,7 @@ func TestAdapterUpdateTableErrorTypes(t *testing.T) {
 	}
 	// Create existing GSI -> ResourceInUseException (ErrGsiInUse, probe P2 default).
 	_, err := a.UpdateTable(ctx, &dynamodb.UpdateTableInput{
-		TableName: aws.String("T"),
+		TableName: aws.String("Tbl"),
 		AttributeDefinitions: []types.AttributeDefinition{
 			{AttributeName: aws.String("gp"), AttributeType: types.ScalarAttributeTypeS},
 		},
@@ -670,7 +681,7 @@ func TestAdapterUpdateTableErrorTypes(t *testing.T) {
 
 	// Delete unknown GSI -> ResourceNotFoundException (ErrGsiNotFoundForDelete, probe P1 default).
 	_, err = a.UpdateTable(ctx, &dynamodb.UpdateTableInput{
-		TableName: aws.String("T"),
+		TableName: aws.String("Tbl"),
 		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
 			Delete: &types.DeleteGlobalSecondaryIndexAction{IndexName: aws.String("nope")},
 		}},
@@ -681,10 +692,10 @@ func TestAdapterUpdateTableErrorTypes(t *testing.T) {
 func TestAdapterGetItemAttributesToGetRejected(t *testing.T) {
 	ctx := context.Background()
 	a := adapterClient(t)
-	mustAdapterTable(t, a, ctx, "T")
+	mustAdapterTable(t, a, ctx, "Tbl")
 
 	_, err := a.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName:       aws.String("T"),
+		TableName:       aws.String("Tbl"),
 		Key:             map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k"}},
 		AttributesToGet: []string{"pk"},
 	})
@@ -697,10 +708,10 @@ func TestAdapterGetItemAttributesToGetRejected(t *testing.T) {
 func TestAdapterGetItemEmptyProjectionRejected(t *testing.T) {
 	ctx := context.Background()
 	a := adapterClient(t)
-	mustAdapterTable(t, a, ctx, "T")
+	mustAdapterTable(t, a, ctx, "Tbl")
 
 	_, err := a.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName:            aws.String("T"),
+		TableName:            aws.String("Tbl"),
 		Key:                  map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k"}},
 		ProjectionExpression: aws.String(""),
 	})
@@ -713,10 +724,10 @@ func TestAdapterGetItemEmptyProjectionRejected(t *testing.T) {
 func TestAdapterGetItemEmptyNamesWithProjectionRejected(t *testing.T) {
 	ctx := context.Background()
 	a := adapterClient(t)
-	mustAdapterTable(t, a, ctx, "T")
+	mustAdapterTable(t, a, ctx, "Tbl")
 
 	_, err := a.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName:                aws.String("T"),
+		TableName:                aws.String("Tbl"),
 		Key:                      map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k"}},
 		ProjectionExpression:     aws.String("pk"),
 		ExpressionAttributeNames: map[string]string{},
@@ -730,10 +741,10 @@ func TestAdapterGetItemEmptyNamesWithProjectionRejected(t *testing.T) {
 func TestAdapterBatchGetEmptyProjectionRejected(t *testing.T) {
 	ctx := context.Background()
 	a := adapterClient(t)
-	mustAdapterTable(t, a, ctx, "T")
+	mustAdapterTable(t, a, ctx, "Tbl")
 
 	_, err := a.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
-		"T": {
+		"Tbl": {
 			Keys:                 []map[string]types.AttributeValue{{"pk": &types.AttributeValueMemberS{Value: "k"}}},
 			ProjectionExpression: aws.String(""),
 		},
@@ -741,5 +752,98 @@ func TestAdapterBatchGetEmptyProjectionRejected(t *testing.T) {
 	var ae smithy.APIError
 	if !errors.As(err, &ae) || ae.ErrorCode() != "ValidationException" {
 		t.Errorf("err = %v, want ValidationException", err)
+	}
+}
+
+func TestAdapterDescribeTableStats(t *testing.T) {
+	ctx := context.Background()
+	a := adapterClient(t)
+	if _, err := a.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName:            aws.String("Tbl"),
+		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
+	}); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+	// Empty: 0/0.
+	desc, err := a.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("Tbl")})
+	if err != nil {
+		t.Fatalf("DescribeTable: %v", err)
+	}
+	if aws.ToInt64(desc.Table.ItemCount) != 0 || aws.ToInt64(desc.Table.TableSizeBytes) != 0 {
+		t.Errorf("empty = (count %d, size %d), want (0, 0)", aws.ToInt64(desc.Table.ItemCount), aws.ToInt64(desc.Table.TableSizeBytes))
+	}
+	// {pk:k1} = 4 bytes.
+	if _, err := a.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName: aws.String("Tbl"),
+		Item:      map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: "k1"}},
+	}); err != nil {
+		t.Fatalf("PutItem: %v", err)
+	}
+	desc, _ = a.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: aws.String("Tbl")})
+	if aws.ToInt64(desc.Table.ItemCount) != 1 || aws.ToInt64(desc.Table.TableSizeBytes) != 4 {
+		t.Errorf("after put = (count %d, size %d), want (1, 4)", aws.ToInt64(desc.Table.ItemCount), aws.ToInt64(desc.Table.TableSizeBytes))
+	}
+}
+
+// M6c W6: the adapter maps the engine's 16MiB-cap spill into SDK
+// UnprocessedKeys, echoing ConsistentRead/projection/EAN. 100 items of W1
+// size 167,773 each: 99 fit (16,609,527), the 100th trips (16,777,300 >
+// 16,777,216) — key-ascending order spills k99.
+func TestAdapterBatchGetUnprocessedKeys(t *testing.T) {
+	ctx := context.Background()
+	a := adapterClient(t)
+	mustAdapterTable(t, a, ctx, "Tbl")
+
+	payload := strings.Repeat("x", 167765) // per-item size 8+167765 = 167773
+	for start := 0; start < 100; start += 25 {
+		reqs := make([]types.WriteRequest, 0, 25)
+		for i := start; i < start+25; i++ {
+			reqs = append(reqs, types.WriteRequest{PutRequest: &types.PutRequest{Item: map[string]types.AttributeValue{
+				"pk":  &types.AttributeValueMemberS{Value: fmt.Sprintf("k%02d", i)},
+				"big": &types.AttributeValueMemberS{Value: payload},
+			}}})
+		}
+		if _, err := a.BatchWriteItem(ctx, &dynamodb.BatchWriteItemInput{RequestItems: map[string][]types.WriteRequest{"Tbl": reqs}}); err != nil {
+			t.Fatalf("BatchWriteItem seed: %v", err)
+		}
+	}
+
+	keys := make([]map[string]types.AttributeValue, 0, 100)
+	for i := 0; i < 100; i++ {
+		keys = append(keys, map[string]types.AttributeValue{"pk": &types.AttributeValueMemberS{Value: fmt.Sprintf("k%02d", i)}})
+	}
+	out, err := a.BatchGetItem(ctx, &dynamodb.BatchGetItemInput{RequestItems: map[string]types.KeysAndAttributes{
+		"Tbl": {
+			Keys:                     keys,
+			ConsistentRead:           aws.Bool(true),
+			ProjectionExpression:     aws.String("#b"),
+			ExpressionAttributeNames: map[string]string{"#b": "big"},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("BatchGetItem: %v", err)
+	}
+	if got := len(out.Responses["Tbl"]); got != 99 {
+		t.Errorf("len(Responses[Tbl]) = %d, want 99", got)
+	}
+	spilled, ok := out.UnprocessedKeys["Tbl"]
+	if !ok {
+		t.Fatalf("UnprocessedKeys missing Tbl entry: %v", out.UnprocessedKeys)
+	}
+	if len(spilled.Keys) != 1 {
+		t.Fatalf("len(spilled.Keys) = %d, want 1", len(spilled.Keys))
+	}
+	if got := spilled.Keys[0]["pk"].(*types.AttributeValueMemberS).Value; got != "k99" {
+		t.Errorf("spilled key = %q, want k99", got)
+	}
+	if !aws.ToBool(spilled.ConsistentRead) {
+		t.Errorf("spilled ConsistentRead = %v, want true", spilled.ConsistentRead)
+	}
+	if got := aws.ToString(spilled.ProjectionExpression); got != "#b" {
+		t.Errorf("spilled ProjectionExpression = %q, want #b", got)
+	}
+	if spilled.ExpressionAttributeNames["#b"] != "big" {
+		t.Errorf("spilled ExpressionAttributeNames = %v, want {#b:big}", spilled.ExpressionAttributeNames)
 	}
 }

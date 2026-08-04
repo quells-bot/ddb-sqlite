@@ -19,8 +19,8 @@ func TestCreateDataTableStringKey(t *testing.T) {
 		t.Fatalf("CreateDataTable: %v", err)
 	}
 	// UNIQUE(hash) must reject a duplicate partition key.
-	tx.Exec(`INSERT INTO `+TableName("Users")+` (hash, data) VALUES (?, ?)`, "k1", []byte("a"))
-	_, err := tx.Exec(`INSERT INTO `+TableName("Users")+` (hash, data) VALUES (?, ?)`, "k1", []byte("b"))
+	tx.Exec(`INSERT INTO `+TableName("Users")+` (hash, data, size) VALUES (?, ?, ?)`, "k1", []byte("a"), 0)
+	_, err := tx.Exec(`INSERT INTO `+TableName("Users")+` (hash, data, size) VALUES (?, ?, ?)`, "k1", []byte("b"), 0)
 	if err == nil {
 		t.Error("duplicate hash key was accepted; want UNIQUE violation")
 	}
@@ -36,13 +36,13 @@ func TestCreateDataTableNumberKeyWithRange(t *testing.T) {
 		t.Fatalf("CreateDataTable: %v", err)
 	}
 	// N key column has REAL affinity: a float binds and is ordered numerically.
-	_, err := tx.Exec(`INSERT INTO `+TableName("Orders")+` (hash, range, data) VALUES (?, ?, ?)`, 1.5, "a", []byte("x"))
+	_, err := tx.Exec(`INSERT INTO `+TableName("Orders")+` (hash, range, data, size) VALUES (?, ?, ?, ?)`, 1.5, "a", []byte("x"), 0)
 	if err != nil {
 		t.Errorf("insert with REAL hash: %v", err)
 	}
 	// UNIQUE(hash, range) rejects only full-key duplicates.
-	tx.Exec(`INSERT INTO `+TableName("Orders")+` (hash, range, data) VALUES (?, ?, ?)`, 1.5, "a", []byte("dup"))
-	_, err = tx.Exec(`INSERT INTO `+TableName("Orders")+` (hash, range, data) VALUES (?, ?, ?)`, 1.5, "b", []byte("ok"))
+	tx.Exec(`INSERT INTO `+TableName("Orders")+` (hash, range, data, size) VALUES (?, ?, ?, ?)`, 1.5, "a", []byte("dup"), 0)
+	_, err = tx.Exec(`INSERT INTO `+TableName("Orders")+` (hash, range, data, size) VALUES (?, ?, ?, ?)`, 1.5, "b", []byte("ok"), 0)
 	if err != nil {
 		t.Errorf("distinct range should be allowed: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestCreateDataTableBinaryBlobRoundTrip(t *testing.T) {
 		t.Fatalf("CreateDataTable: %v", err)
 	}
 	blob := []byte{0x00, 0xff, 0x42, 'a', 'b'}
-	if _, err := tx.Exec(`INSERT INTO `+TableName("Blobs")+` (hash, data) VALUES (?, ?)`, blob, blob); err != nil {
+	if _, err := tx.Exec(`INSERT INTO `+TableName("Blobs")+` (hash, data, size) VALUES (?, ?, ?)`, blob, blob, 0); err != nil {
 		t.Fatalf("insert BLOB key+data: %v", err)
 	}
 	var got []byte
@@ -114,6 +114,76 @@ func TestCreateDataTableNoTTLColumn(t *testing.T) {
 	}
 }
 
+func TestTableStats(t *testing.T) {
+	s := newTestStore(t)
+	tx, _ := s.BeginTx(context.Background())
+	defer tx.Rollback()
+
+	if err := s.CreateDataTable(tx, TableDef{Name: "T", Hash: "pk", HashType: "S"}); err != nil {
+		t.Fatalf("CreateDataTable: %v", err)
+	}
+	// Empty table: 0 items, 0 bytes.
+	count, size, err := s.TableStats(tx, "T")
+	if err != nil {
+		t.Fatalf("TableStats empty: %v", err)
+	}
+	if count != 0 || size != 0 {
+		t.Errorf("empty stats = (%d, %d), want (0, 0)", count, size)
+	}
+	// Two items with caller-supplied sizes (storage stores, never computes).
+	if _, err := s.PutItem(tx, "T", "k1", nil, []byte("a"), 10); err != nil {
+		t.Fatalf("PutItem 1: %v", err)
+	}
+	if _, err := s.PutItem(tx, "T", "k2", nil, []byte("b"), 20); err != nil {
+		t.Fatalf("PutItem 2: %v", err)
+	}
+	count, size, err = s.TableStats(tx, "T")
+	if err != nil {
+		t.Fatalf("TableStats: %v", err)
+	}
+	if count != 2 || size != 30 {
+		t.Errorf("stats = (%d, %d), want (2, 30)", count, size)
+	}
+	// Overwrite k1 with a different size (INSERT OR REPLACE replaces the row).
+	if _, err := s.PutItem(tx, "T", "k1", nil, []byte("c"), 5); err != nil {
+		t.Fatalf("PutItem overwrite: %v", err)
+	}
+	count, size, _ = s.TableStats(tx, "T")
+	if count != 2 || size != 25 {
+		t.Errorf("after overwrite stats = (%d, %d), want (2, 25)", count, size)
+	}
+}
+
+func TestGsiStats(t *testing.T) {
+	s := newTestStore(t)
+	tx, _ := s.BeginTx(context.Background())
+	defer tx.Rollback()
+
+	def := TableDef{Name: "T", Hash: "pk", HashType: "S"}
+	s.CreateDataTable(tx, def)
+	gsi := GsiDef{Name: "g1", Hash: "gp", HashType: "S", ProjectionType: "ALL"}
+	s.CreateGsiTable(tx, def, gsi)
+
+	id1, _ := s.PutItem(tx, "T", "k1", nil, []byte("a"), 10)
+	if err := s.UpsertGsiRow(tx, "T", "g1", id1, "G1", nil, 10); err != nil {
+		t.Fatalf("UpsertGsiRow: %v", err)
+	}
+	count, size, err := s.GsiStats(tx, "T", "g1")
+	if err != nil {
+		t.Fatalf("GsiStats: %v", err)
+	}
+	if count != 1 || size != 10 {
+		t.Errorf("gsi stats = (%d, %d), want (1, 10)", count, size)
+	}
+	// Empty GSI table (a second GSI with no rows).
+	gsi2 := GsiDef{Name: "g2", Hash: "gp", HashType: "S", ProjectionType: "ALL"}
+	s.CreateGsiTable(tx, def, gsi2)
+	count, size, _ = s.GsiStats(tx, "T", "g2")
+	if count != 0 || size != 0 {
+		t.Errorf("empty gsi stats = (%d, %d), want (0, 0)", count, size)
+	}
+}
+
 func TestExpireExpired(t *testing.T) {
 	s := newTestStore(t)
 	tx, _ := s.BeginTx(context.Background())
@@ -129,16 +199,16 @@ func TestExpireExpired(t *testing.T) {
 	}
 
 	// Seed three items; the one with blob "expire" is marked expired.
-	id1, _ := s.PutItem(tx, "T", "k1", nil, []byte("keep1"))
-	id2, _ := s.PutItem(tx, "T", "k2", nil, []byte("expire"))
-	id3, _ := s.PutItem(tx, "T", "k3", nil, []byte("keep2"))
-	if err := s.UpsertGsiRow(tx, "T", "g1", id1, "G1", nil); err != nil {
+	id1, _ := s.PutItem(tx, "T", "k1", nil, []byte("keep1"), 0)
+	id2, _ := s.PutItem(tx, "T", "k2", nil, []byte("expire"), 0)
+	id3, _ := s.PutItem(tx, "T", "k3", nil, []byte("keep2"), 0)
+	if err := s.UpsertGsiRow(tx, "T", "g1", id1, "G1", nil, 0); err != nil {
 		t.Fatalf("UpsertGsiRow 1: %v", err)
 	}
-	if err := s.UpsertGsiRow(tx, "T", "g1", id2, "G2", nil); err != nil {
+	if err := s.UpsertGsiRow(tx, "T", "g1", id2, "G2", nil, 0); err != nil {
 		t.Fatalf("UpsertGsiRow 2: %v", err)
 	}
-	if err := s.UpsertGsiRow(tx, "T", "g1", id3, "G3", nil); err != nil {
+	if err := s.UpsertGsiRow(tx, "T", "g1", id3, "G3", nil, 0); err != nil {
 		t.Fatalf("UpsertGsiRow 3: %v", err)
 	}
 
@@ -175,7 +245,7 @@ func TestExpireExpiredCallbackError(t *testing.T) {
 	defer tx.Rollback()
 
 	s.CreateDataTable(tx, dataDef())
-	s.PutItem(tx, "T", "k1", nil, []byte("bad"))
+	s.PutItem(tx, "T", "k1", nil, []byte("bad"), 0)
 
 	boom := func(data []byte) (bool, error) { return false, fmt.Errorf("corrupt blob") }
 	if _, err := s.ExpireExpired(tx, "T", boom); err == nil {
@@ -193,7 +263,7 @@ func TestScanAllDataOrderAndEOF(t *testing.T) {
 	// Insert rows with hashes out of hash order; ScanAllData must yield them in
 	// id order (auto-increment rowid == insertion order), NOT hash order.
 	for _, v := range []string{"c", "a", "b"} {
-		s.PutItem(tx, "T", v, nil, []byte("d"+v))
+		s.PutItem(tx, "T", v, nil, []byte("d"+v), 0)
 	}
 
 	next, err := s.ScanAllData(tx, "T")
@@ -234,7 +304,7 @@ func TestScanAllDataInterleave(t *testing.T) {
 	s.CreateDataTable(tx, TableDef{Name: "A", Hash: "pk", HashType: "S"})
 	s.CreateDataTable(tx, TableDef{Name: "B", Hash: "id", HashType: "N"})
 	for i, v := range []string{"a", "b", "c"} {
-		s.PutItem(tx, "A", v, nil, []byte(v))
+		s.PutItem(tx, "A", v, nil, []byte(v), 0)
 		_ = i
 	}
 
@@ -252,7 +322,7 @@ func TestScanAllDataInterleave(t *testing.T) {
 			t.Fatalf("next: %v", err)
 		}
 		visited = append(visited, id)
-		if _, err := tx.Exec(`INSERT INTO `+TableName("B")+` (hash, data) VALUES (?, ?)`, float64(id), []byte("x")); err != nil {
+		if _, err := tx.Exec(`INSERT INTO `+TableName("B")+` (hash, data, size) VALUES (?, ?, ?)`, float64(id), []byte("x"), 0); err != nil {
 			t.Fatalf("interleave insert: %v", err)
 		}
 	}

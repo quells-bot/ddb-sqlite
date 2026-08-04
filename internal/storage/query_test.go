@@ -12,7 +12,7 @@ func TestGetItemReturnsID(t *testing.T) {
 	defer tx.Rollback()
 
 	s.CreateDataTable(tx, TableDef{Name: "T", Hash: "pk", HashType: "S", Range: "sk", RangeType: "S"})
-	s.PutItem(tx, "T", "p1", "s1", []byte("hello"))
+	s.PutItem(tx, "T", "p1", "s1", []byte("hello"), 0)
 
 	id, data, found, err := s.GetItem(tx, "T", "p1", "s1")
 	if err != nil || !found {
@@ -36,7 +36,7 @@ func TestQuerySortKeyTable(t *testing.T) {
 
 	// Seed 5 items in one partition, sorted by sk.
 	for i := range 5 {
-		s.PutItem(tx, "T", "p1", float64(i*2), []byte{byte('a' + i)})
+		s.PutItem(tx, "T", "p1", float64(i*2), []byte{byte('a' + i)}, 0)
 	}
 
 	cases := []struct {
@@ -75,7 +75,7 @@ func TestQueryPartitionOnlyTable(t *testing.T) {
 
 	def := TableDef{Name: "PO", Hash: "pk", HashType: "S"}
 	s.CreateDataTable(tx, def)
-	s.PutItem(tx, "PO", "k1", nil, []byte("data"))
+	s.PutItem(tx, "PO", "k1", nil, []byte("data"), 0)
 
 	blobs, err := s.Query(tx, "PO", "k1", nil, true, 0)
 	if err != nil {
@@ -98,7 +98,7 @@ func TestScan(t *testing.T) {
 	s.CreateDataTable(tx, def)
 
 	for i := range 10 {
-		s.PutItem(tx, "T", fmt.Sprintf("p%d", i), float64(i), []byte{byte(i)})
+		s.PutItem(tx, "T", fmt.Sprintf("p%d", i), float64(i), []byte{byte(i)}, 0)
 	}
 
 	// Full scan.

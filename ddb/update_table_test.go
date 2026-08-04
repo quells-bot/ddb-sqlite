@@ -3,20 +3,22 @@ package ddb
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/quells-bot/ddb-sqlite-core/attrval"
 	"github.com/quells-bot/ddb-sqlite-core/internal/storage"
 )
 
-// newEmptyTable creates a table "T" with pk HASH S, sk RANGE S and no GSIs —
+// newEmptyTable creates a table "Tbl" with pk HASH S, sk RANGE S and no GSIs —
 // the base for UpdateTable add tests (its AttributeDefinitions are pk, sk only).
 func newEmptyTable(t *testing.T) *Client {
 	t.Helper()
 	c := newClient(t)
 	ctx := context.Background()
 	_, err := c.CreateTable(ctx, CreateTableInput{
-		TableName: "T",
+		TableName: "Tbl",
 		KeySchema: []KeySchemaElement{
 			{AttributeName: "pk", KeyType: "HASH"},
 			{AttributeName: "sk", KeyType: "RANGE"},
@@ -49,51 +51,51 @@ func TestValidateUpdateTableShape(t *testing.T) {
 	}{
 		{
 			"truly empty rejected",
-			UpdateTableInput{TableName: "T"},
+			UpdateTableInput{TableName: "Tbl"},
 			ErrValidation,
 		},
 		{
 			"throughput-only no-op ok",
-			UpdateTableInput{TableName: "T", NonGsiFieldsPresent: true},
+			UpdateTableInput{TableName: "Tbl", NonGsiFieldsPresent: true},
 			nil,
 		},
 		{
 			"two entries rejected",
-			UpdateTableInput{TableName: "T", GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{
+			UpdateTableInput{TableName: "Tbl", GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{
 				{Create: &gsi}, {Create: &gsi},
 			}},
 			ErrValidation,
 		},
 		{
 			"neither set rejected",
-			UpdateTableInput{TableName: "T", GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{}}},
+			UpdateTableInput{TableName: "Tbl", GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{}}},
 			ErrValidation,
 		},
 		{
 			"both set rejected",
-			UpdateTableInput{TableName: "T", GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{
+			UpdateTableInput{TableName: "Tbl", GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{
 				{Create: &gsi, Delete: strPtr("g1")},
 			}},
 			ErrValidation,
 		},
 		{
 			"create plus ignored field rejected",
-			UpdateTableInput{TableName: "T", NonGsiFieldsPresent: true, GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{Create: &gsi}}},
+			UpdateTableInput{TableName: "Tbl", NonGsiFieldsPresent: true, GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{Create: &gsi}}},
 			ErrValidation,
 		},
 		{
 			"attribute defs without create rejected",
-			UpdateTableInput{TableName: "T", NonGsiFieldsPresent: true, AttributeDefinitions: []AttributeDefinition{strAttr("gp", "S")}},
+			UpdateTableInput{TableName: "Tbl", NonGsiFieldsPresent: true, AttributeDefinitions: []AttributeDefinition{strAttr("gp", "S")}},
 			ErrValidation,
 		},
 		{
 			"attribute defs with delete rejected",
-			UpdateTableInput{TableName: "T", GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{Delete: strPtr("g1")}}, AttributeDefinitions: []AttributeDefinition{strAttr("gp", "S")}},
+			UpdateTableInput{TableName: "Tbl", GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{Delete: strPtr("g1")}}, AttributeDefinitions: []AttributeDefinition{strAttr("gp", "S")}},
 			ErrValidation,
 		},
 		{
 			"create only ok",
-			UpdateTableInput{TableName: "T", AttributeDefinitions: []AttributeDefinition{strAttr("gp", "S")}, GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{Create: &gsi}}},
+			UpdateTableInput{TableName: "Tbl", AttributeDefinitions: []AttributeDefinition{strAttr("gp", "S")}, GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{Create: &gsi}}},
 			nil,
 		},
 	}
@@ -117,7 +119,7 @@ func strPtr(s string) *string { return &s }
 
 func baseCreateInput(name string, ks []KeySchemaElement, defs []AttributeDefinition) UpdateTableInput {
 	return UpdateTableInput{
-		TableName:            "T",
+		TableName:            "Tbl",
 		AttributeDefinitions: defs,
 		GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{
 			Create: &GlobalSecondaryIndex{IndexName: name, KeySchema: ks, Projection: Projection{Type: "ALL"}},
@@ -130,7 +132,7 @@ func hashKey(attr string) []KeySchemaElement {
 }
 
 func TestValidateCreateGsi(t *testing.T) {
-	// Table "T": pk HASH S, sk RANGE S, no GSIs.
+	// Table "Tbl": pk HASH S, sk RANGE S, no GSIs.
 	def := storage.TableDef{
 		ID: 1, Name: "T", Hash: "pk", HashType: "S", Range: "sk", RangeType: "S",
 	}
@@ -204,7 +206,7 @@ func TestValidateCreateGsi(t *testing.T) {
 		{
 			"composite valid",
 			UpdateTableInput{
-				TableName:            "T",
+				TableName:            "Tbl",
 				AttributeDefinitions: []AttributeDefinition{strAttr("gh", "S"), strAttr("gr", "S")},
 				GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{
 					Create: &GlobalSecondaryIndex{
@@ -240,7 +242,7 @@ func TestUpdateTableCreateOnEmpty(t *testing.T) {
 	c := newEmptyTable(t)
 	ctx := context.Background()
 	out, err := c.UpdateTable(ctx, UpdateTableInput{
-		TableName:            "T",
+		TableName:            "Tbl",
 		AttributeDefinitions: []AttributeDefinition{strAttr("gp", "S")},
 		GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{
 			Create: &GlobalSecondaryIndex{
@@ -261,7 +263,7 @@ func TestUpdateTableCreateOnEmpty(t *testing.T) {
 	}
 	// Query the (empty) GSI works and returns no items.
 	q, err := c.Query(ctx, QueryInput{
-		TableName: "T", IndexName: "g1a",
+		TableName: "Tbl", IndexName: "g1a",
 		KeyConditionExpression:    "gp = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("any")},
 	})
@@ -277,20 +279,20 @@ func TestUpdateTableCreateBackfill(t *testing.T) {
 	c := newEmptyTable(t)
 	ctx := context.Background()
 	// Seed items before the GSI exists: two indexable, one sparse (no gp).
-	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
 		"pk": attrval.NewString("A"), "sk": attrval.NewString("a"),
 		"gp": attrval.NewString("G1"), "gr": attrval.NewString("s1"),
 	}})
-	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
 		"pk": attrval.NewString("B"), "sk": attrval.NewString("b"),
 		"gp": attrval.NewString("G1"), "gr": attrval.NewString("s2"),
 	}})
-	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
 		"pk": attrval.NewString("D"), "sk": attrval.NewString("d"), // sparse: no gp
 	}})
 
 	if _, err := c.UpdateTable(ctx, UpdateTableInput{
-		TableName:            "T",
+		TableName:            "Tbl",
 		AttributeDefinitions: []AttributeDefinition{strAttr("gp", "S"), strAttr("gr", "S")},
 		GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{
 			Create: &GlobalSecondaryIndex{
@@ -307,7 +309,7 @@ func TestUpdateTableCreateBackfill(t *testing.T) {
 	}
 
 	q, err := c.Query(ctx, QueryInput{
-		TableName: "T", IndexName: "g1a",
+		TableName: "Tbl", IndexName: "g1a",
 		KeyConditionExpression:    "gp = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
 		ScanIndexForward:          true,
@@ -334,25 +336,25 @@ func TestUpdateTableBackfillSkipsNonIndexable(t *testing.T) {
 	c := newEmptyTable(t)
 	ctx := context.Background()
 	// Table has no GSI on "gp" yet, so these puts are accepted unconditionally.
-	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
 		"pk": attrval.NewString("good"), "sk": attrval.NewString("a"),
 		"gp": attrval.NewString("G1"), // indexable
 	}})
-	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
 		"pk": attrval.NewString("num"), "sk": attrval.NewString("b"),
 		"gp": attrval.NewNumber(mustNum("5")), // wrong type (S declared)
 	}})
-	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
 		"pk": attrval.NewString("list"), "sk": attrval.NewString("c"),
 		"gp": attrval.NewList([]attrval.Value{attrval.NewString("x")}), // non-scalar
 	}})
-	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
 		"pk": attrval.NewString("empty"), "sk": attrval.NewString("d"),
 		"gp": attrval.NewString(""), // empty string
 	}})
 
 	if _, err := c.UpdateTable(ctx, UpdateTableInput{
-		TableName:            "T",
+		TableName:            "Tbl",
 		AttributeDefinitions: []AttributeDefinition{strAttr("gp", "S")},
 		GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{
 			Create: &GlobalSecondaryIndex{
@@ -365,7 +367,7 @@ func TestUpdateTableBackfillSkipsNonIndexable(t *testing.T) {
 		t.Fatalf("UpdateTable with non-indexable pre-GSI items: %v", err)
 	}
 	q, err := c.Query(ctx, QueryInput{
-		TableName: "T", IndexName: "g1a",
+		TableName: "Tbl", IndexName: "g1a",
 		KeyConditionExpression:    "gp = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("G1")},
 	})
@@ -382,11 +384,11 @@ func TestUpdateTableBackfillSkipsNonIndexable(t *testing.T) {
 func TestUpdateTableCreateOverlappingKey(t *testing.T) {
 	c := newEmptyTable(t)
 	ctx := context.Background()
-	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
+	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
 		"pk": attrval.NewString("A"), "sk": attrval.NewString("sortval"),
 	}})
 	if _, err := c.UpdateTable(ctx, UpdateTableInput{
-		TableName: "T",
+		TableName: "Tbl",
 		// No AttributeDefinitions: sk is already declared on the table.
 		GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{
 			Create: &GlobalSecondaryIndex{
@@ -399,7 +401,7 @@ func TestUpdateTableCreateOverlappingKey(t *testing.T) {
 		t.Fatalf("UpdateTable overlapping key: %v", err)
 	}
 	q, err := c.Query(ctx, QueryInput{
-		TableName: "T", IndexName: "bysk",
+		TableName: "Tbl", IndexName: "bysk",
 		KeyConditionExpression:    "sk = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("sortval")},
 	})
@@ -416,24 +418,24 @@ func TestUpdateTableDelete(t *testing.T) {
 	ctx := context.Background()
 	// Add a GSI, then delete it.
 	c.UpdateTable(ctx, UpdateTableInput{
-		TableName:            "T",
+		TableName:            "Tbl",
 		AttributeDefinitions: []AttributeDefinition{strAttr("gp", "S")},
 		GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{
 			Create: &GlobalSecondaryIndex{IndexName: "g1a", KeySchema: hashKey("gp"), Projection: Projection{Type: "ALL"}},
 		}},
 	})
 	if _, err := c.UpdateTable(ctx, UpdateTableInput{
-		TableName:                   "T",
+		TableName:                   "Tbl",
 		GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{Delete: strPtr("g1a")}},
 	}); err != nil {
 		t.Fatalf("UpdateTable delete: %v", err)
 	}
-	desc, _ := c.DescribeTable(ctx, DescribeTableInput{TableName: "T"})
+	desc, _ := c.DescribeTable(ctx, DescribeTableInput{TableName: "Tbl"})
 	if len(desc.GlobalSecondaryIndexes) != 0 {
 		t.Errorf("after delete, GSIs = %v, want none", desc.GlobalSecondaryIndexes)
 	}
 	_, err := c.Query(ctx, QueryInput{
-		TableName: "T", IndexName: "g1a",
+		TableName: "Tbl", IndexName: "g1a",
 		KeyConditionExpression:    "gp = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{":v": attrval.NewString("x")},
 	})
@@ -446,7 +448,7 @@ func TestUpdateTableDeleteUnknown(t *testing.T) {
 	c := newEmptyTable(t)
 	ctx := context.Background()
 	_, err := c.UpdateTable(ctx, UpdateTableInput{
-		TableName:                   "T",
+		TableName:                   "Tbl",
 		GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{Delete: strPtr("nope")}},
 	})
 	if !errors.Is(err, ErrGsiNotFoundForDelete) {
@@ -457,8 +459,8 @@ func TestUpdateTableDeleteUnknown(t *testing.T) {
 func TestUpdateTableNoOpThroughputOnly(t *testing.T) {
 	c := newEmptyTable(t)
 	ctx := context.Background()
-	before, _ := c.DescribeTable(ctx, DescribeTableInput{TableName: "T"})
-	out, err := c.UpdateTable(ctx, UpdateTableInput{TableName: "T", NonGsiFieldsPresent: true})
+	before, _ := c.DescribeTable(ctx, DescribeTableInput{TableName: "Tbl"})
+	out, err := c.UpdateTable(ctx, UpdateTableInput{TableName: "Tbl", NonGsiFieldsPresent: true})
 	if err != nil {
 		t.Fatalf("throughput-only UpdateTable: %v", err)
 	}
@@ -483,13 +485,13 @@ func TestUpdateTableFailedAddRollback(t *testing.T) {
 	ctx := context.Background()
 	// Inject a malformed blob directly via storage on a prior committed tx.
 	rtx, _ := c.store.BeginTx(ctx)
-	c.store.PutItem(rtx, "T", "badrow", "r", []byte("not json"))
+	c.store.PutItem(rtx, "Tbl", "badrow", "r", []byte("not json"), 0)
 	if err := rtx.Commit(); err != nil {
 		t.Fatalf("seed bad blob: %v", err)
 	}
 
 	_, err := c.UpdateTable(ctx, UpdateTableInput{
-		TableName:            "T",
+		TableName:            "Tbl",
 		AttributeDefinitions: []AttributeDefinition{strAttr("gp", "S")},
 		GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{
 			Create: &GlobalSecondaryIndex{IndexName: "g1a", KeySchema: hashKey("gp"), Projection: Projection{Type: "ALL"}},
@@ -499,8 +501,116 @@ func TestUpdateTableFailedAddRollback(t *testing.T) {
 		t.Fatal("UpdateTable with a bad blob should fail during backfill")
 	}
 	// After rollback, the GSI must be absent.
-	desc, _ := c.DescribeTable(ctx, DescribeTableInput{TableName: "T"})
+	desc, _ := c.DescribeTable(ctx, DescribeTableInput{TableName: "Tbl"})
 	if len(desc.GlobalSecondaryIndexes) != 0 {
 		t.Errorf("after failed add, GSIs = %v, want none (rollback)", desc.GlobalSecondaryIndexes)
+	}
+}
+
+func TestUpdateTableGsiKeyAttrNameLength(t *testing.T) {
+	c := newClient(t)
+	ctx := context.Background()
+	mustCreateTable(t, c, "UTN")
+
+	name256 := strings.Repeat("g", 256)
+	_, err := c.UpdateTable(ctx, UpdateTableInput{
+		TableName:            "UTN",
+		AttributeDefinitions: []AttributeDefinition{{AttributeName: name256, AttributeType: "S"}},
+		GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{Create: &GlobalSecondaryIndex{
+			IndexName:  "gsi1",
+			KeySchema:  []KeySchemaElement{{AttributeName: name256, KeyType: "HASH"}},
+			Projection: Projection{Type: "ALL"},
+		}}},
+	})
+	if !errors.Is(err, ErrValidation) {
+		t.Errorf("err = %v, want ErrValidation", err)
+	}
+}
+
+func TestUpdateTableCrossIndexProjectionSum(t *testing.T) {
+	c := newClient(t)
+	ctx := context.Background()
+
+	attrs := func(prefix string, n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = fmt.Sprintf("%s%03d", prefix, i)
+		}
+		return out
+	}
+
+	// Table starts with one INCLUDE-60 GSI.
+	if _, err := c.CreateTable(ctx, CreateTableInput{
+		TableName:            "UTSum",
+		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
+		AttributeDefinitions: []AttributeDefinition{{AttributeName: "pk", AttributeType: "S"}},
+		GlobalSecondaryIndexes: []GlobalSecondaryIndex{{
+			IndexName:  "sumg1",
+			KeySchema:  []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
+			Projection: Projection{Type: "INCLUDE", NonKeyAttributes: attrs("a", 60)},
+		}},
+	}); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+
+	addGsi := func(name string, projected []string) error {
+		_, err := c.UpdateTable(ctx, UpdateTableInput{
+			TableName: "UTSum",
+			GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{Create: &GlobalSecondaryIndex{
+				IndexName:  name,
+				KeySchema:  []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
+				Projection: Projection{Type: "INCLUDE", NonKeyAttributes: projected},
+			}}},
+		})
+		return err
+	}
+
+	// 60 + 40 = 100: accepted.
+	if err := addGsi("sumg2", attrs("b", 40)); err != nil {
+		t.Errorf("sum 100 via UpdateTable: %v", err)
+	}
+	// 100 + 1 = 101: rejected.
+	if err := addGsi("sumg3", attrs("c", 1)); !errors.Is(err, ErrValidation) {
+		t.Errorf("sum 101 via UpdateTable: err = %v, want ErrValidation", err)
+	}
+}
+
+// W8 #8: an UpdateTable GSI Create naming an existing index surfaces
+// ErrGsiInUse even when the new key schema is invalid — the existing-index
+// check beats schema validation (dynamodb-local, P-misc probe).
+func TestUpdateTableCreateExistingPrecedence(t *testing.T) {
+	c := newClient(t)
+	ctx := context.Background()
+	_, err := c.CreateTable(ctx, CreateTableInput{
+		TableName: "Tbl",
+		KeySchema: []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
+		AttributeDefinitions: []AttributeDefinition{
+			strAttr("pk", "S"),
+			strAttr("gk", "S"),
+		},
+		GlobalSecondaryIndexes: []GlobalSecondaryIndex{{
+			IndexName:  "gsi1",
+			KeySchema:  []KeySchemaElement{{AttributeName: "gk", KeyType: "HASH"}},
+			Projection: Projection{Type: "KEYS_ONLY"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+	_, err = c.UpdateTable(ctx, UpdateTableInput{
+		TableName: "Tbl",
+		GlobalSecondaryIndexUpdates: []GlobalSecondaryIndexUpdate{{
+			Create: &GlobalSecondaryIndex{
+				IndexName: "gsi1",
+				KeySchema: []KeySchemaElement{
+					{AttributeName: "gk", KeyType: "HASH"},
+					{AttributeName: "gk", KeyType: "RANGE"},
+				},
+				Projection: Projection{Type: "KEYS_ONLY"},
+			},
+		}},
+	})
+	if !errors.Is(err, ErrGsiInUse) {
+		t.Errorf("err = %v, want ErrGsiInUse (existing-index beats schema validation)", err)
 	}
 }

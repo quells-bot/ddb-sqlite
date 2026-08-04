@@ -37,10 +37,6 @@ type PutItemOutput struct {
 	Attributes Item
 }
 
-// maxItemBytes is the 400KB item-size proxy (JSON byte length). Full accounting
-// is deferred to M6; M1 uses this faithful-enough proxy.
-const maxItemBytes = 400 * 1024
-
 // tagForKeyType maps a DynamoDB key type to the attrval tag it must carry.
 func tagForKeyType(t string) attrval.Tag {
 	switch t {
@@ -74,6 +70,9 @@ func keyValue(v attrval.Value) (any, error) {
 }
 
 func (c *Client) PutItem(ctx context.Context, in PutItemInput) (PutItemOutput, error) {
+	if err := validateTableName(in.TableName); err != nil {
+		return PutItemOutput{}, err
+	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return PutItemOutput{}, err
@@ -115,13 +114,18 @@ func (c *Client) PutItem(ctx context.Context, in PutItemInput) (PutItemOutput, e
 	}
 	cond := ex.Cond
 
-	// Item-size limit (JSON byte-length proxy).
+	// Serialize the item to wire JSON for storage.
 	wire, err := json.Marshal(in.Item)
 	if err != nil {
 		return PutItemOutput{}, fmt.Errorf("%w: marshal item: %v", ErrValidation, err)
 	}
-	if len(wire) > maxItemBytes {
-		return PutItemOutput{}, fmt.Errorf("%w: item size %d exceeds %d bytes", ErrValidation, len(wire), maxItemBytes)
+	// Item-size limit (AWS-faithful accounting, M6c W1).
+	size, depth := itemSize(in.Item)
+	if size > maxItemSize {
+		return PutItemOutput{}, fmt.Errorf("%w: item size %d exceeds %d bytes", ErrValidation, size, maxItemSize)
+	}
+	if depth > maxItemDepth {
+		return PutItemOutput{}, fmt.Errorf("%w: item nesting depth %d exceeds %d levels", ErrValidation, depth, maxItemDepth)
 	}
 
 	// Extract key column values.
@@ -154,11 +158,11 @@ func (c *Client) PutItem(ctx context.Context, in PutItemInput) (PutItemOutput, e
 		return PutItemOutput{}, err
 	}
 
-	dataID, err := c.store.PutItem(tx, in.TableName, hashVal, rangeVal, wire)
+	dataID, err := c.store.PutItem(tx, in.TableName, hashVal, rangeVal, wire, size)
 	if err != nil {
 		return PutItemOutput{}, err
 	}
-	if err := c.maintainGsiRows(tx, in.TableName, def.GSIs, dataID, in.Item); err != nil {
+	if err := c.maintainGsiRows(tx, in.TableName, def.GSIs, dataID, in.Item, size); err != nil {
 		return PutItemOutput{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -228,6 +232,38 @@ type DeleteItemOutput struct {
 	Attributes Item
 }
 
+// Key-value byte limits (P-names, inclusive): partition key 1–2048 bytes,
+// sort key 1–1024 bytes. Local's error text says "under 2048/1024" but the
+// boundary is ≤ (spec §11 message quirk).
+const (
+	maxPartitionKeyBytes = 2048
+	maxSortKeyBytes      = 1024
+)
+
+// validateKeyValueLength enforces DynamoDB's key-value byte limits on one key
+// attribute value: S by UTF-8 byte length, B by raw byte length, both with a
+// 1-byte minimum (empty primary-key values are new enforcement — previously
+// only GSI key values rejected empty S/B). N keys are bounded by the
+// 38-significant-digit limit and need no check.
+func validateKeyValueLength(v attrval.Value, max int) error {
+	var n int
+	switch v.Tag() {
+	case attrval.TagString:
+		n = len(v.Str())
+	case attrval.TagBinary:
+		n = len(v.Bin())
+	default:
+		return nil
+	}
+	if n < 1 {
+		return fmt.Errorf("%w: key attribute value must not be empty", ErrValidation)
+	}
+	if n > max {
+		return fmt.Errorf("%w: key attribute value length %d exceeds %d bytes", ErrValidation, n, max)
+	}
+	return nil
+}
+
 // validatePutKey checks the item carries the table's key attributes with
 // matching types. Shared by PutItem and BatchWriteItem.
 func validatePutKey(def storage.TableDef, item Item) error {
@@ -238,6 +274,9 @@ func validatePutKey(def storage.TableDef, item Item) error {
 	if hv.Tag() != tagForKeyType(def.HashType) {
 		return fmt.Errorf("%w: partition key %q type %s != declared %s", ErrValidation, def.Hash, hv.Type(), def.HashType)
 	}
+	if err := validateKeyValueLength(hv, maxPartitionKeyBytes); err != nil {
+		return err
+	}
 	if def.Range != "" {
 		rv, ok := item[def.Range]
 		if !ok {
@@ -245,6 +284,9 @@ func validatePutKey(def storage.TableDef, item Item) error {
 		}
 		if rv.Tag() != tagForKeyType(def.RangeType) {
 			return fmt.Errorf("%w: sort key %q type %s != declared %s", ErrValidation, def.Range, rv.Type(), def.RangeType)
+		}
+		if err := validateKeyValueLength(rv, maxSortKeyBytes); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -260,6 +302,9 @@ func validateKey(def storage.TableDef, key Item) (hash, range_ attrval.Value, er
 	if hv.Tag() != tagForKeyType(def.HashType) {
 		return attrval.Value{}, attrval.Value{}, fmt.Errorf("%w: partition key %q type mismatch", ErrValidation, def.Hash)
 	}
+	if err := validateKeyValueLength(hv, maxPartitionKeyBytes); err != nil {
+		return attrval.Value{}, attrval.Value{}, err
+	}
 	var rv attrval.Value
 	if def.Range != "" {
 		rv, ok = key[def.Range]
@@ -268,6 +313,9 @@ func validateKey(def storage.TableDef, key Item) (hash, range_ attrval.Value, er
 		}
 		if rv.Tag() != tagForKeyType(def.RangeType) {
 			return attrval.Value{}, attrval.Value{}, fmt.Errorf("%w: sort key %q type mismatch", ErrValidation, def.Range)
+		}
+		if err := validateKeyValueLength(rv, maxSortKeyBytes); err != nil {
+			return attrval.Value{}, attrval.Value{}, err
 		}
 	}
 	// Key must contain exactly the key attributes.
@@ -286,6 +334,9 @@ func mapSizeForKeys(def storage.TableDef) int {
 }
 
 func (c *Client) GetItem(ctx context.Context, in GetItemInput) (GetItemOutput, error) {
+	if err := validateTableName(in.TableName); err != nil {
+		return GetItemOutput{}, err
+	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return GetItemOutput{}, err
@@ -344,6 +395,9 @@ func (c *Client) GetItem(ctx context.Context, in GetItemInput) (GetItemOutput, e
 }
 
 func (c *Client) DeleteItem(ctx context.Context, in DeleteItemInput) (DeleteItemOutput, error) {
+	if err := validateTableName(in.TableName); err != nil {
+		return DeleteItemOutput{}, err
+	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return DeleteItemOutput{}, err

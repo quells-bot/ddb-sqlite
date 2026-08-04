@@ -53,6 +53,9 @@ const maxTTLAttrName = 255
 // validated unconditionally (1-255 chars) whether enabling or disabling; when
 // disabling the name is validated but otherwise ignored.
 func (c *Client) UpdateTimeToLive(ctx context.Context, in UpdateTimeToLiveInput) (UpdateTimeToLiveOutput, error) {
+	if err := validateTableName(in.TableName); err != nil {
+		return UpdateTimeToLiveOutput{}, err
+	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return UpdateTimeToLiveOutput{}, err
@@ -88,6 +91,9 @@ func (c *Client) UpdateTimeToLive(ctx context.Context, in UpdateTimeToLiveInput)
 // DescribeTimeToLive reports the configured TTL status: "ENABLED" when a TTL
 // attribute name is set, "DISABLED" otherwise.
 func (c *Client) DescribeTimeToLive(ctx context.Context, in DescribeTimeToLiveInput) (DescribeTimeToLiveOutput, error) {
+	if err := validateTableName(in.TableName); err != nil {
+		return DescribeTimeToLiveOutput{}, err
+	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return DescribeTimeToLiveOutput{}, err
@@ -118,6 +124,9 @@ func (c *Client) DescribeTimeToLive(ctx context.Context, in DescribeTimeToLiveIn
 // remain visible on every read until this runs (Faithful model). Returns 0 when
 // TTL is disabled. GSI index rows are cascade-deleted by storage.
 func (c *Client) ExpireExpired(ctx context.Context, tableName string) (int, error) {
+	if err := validateTableName(tableName); err != nil {
+		return 0, err
+	}
 	tx, err := c.store.BeginTx(ctx)
 	if err != nil {
 		return 0, err

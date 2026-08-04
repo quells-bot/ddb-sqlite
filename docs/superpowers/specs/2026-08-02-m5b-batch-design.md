@@ -28,7 +28,7 @@ The parent spec §6.2 states:
 
 M5b refines three points:
 
-1. **16MB size limits are not enforced.** For BatchWriteItem, 25 items at the 400KB item cap = 10MB — the count limit is the only practical guardrail. For BatchGetItem, the 16MB is a response-side limit (overflow goes to `UnprocessedKeys`), which contradicts "UnprocessedKeys always empty" under no throttling. Note the asymmetry: the BatchGetItem limit *is* reachable in principle (100 keys × 400KB items = 40MB), where real DynamoDB paginates the overflow into `UnprocessedKeys` and the engine returns the full response — a documented divergence, acceptable for a test mock (40MB responses are far outside unit-test usage). Count limits (25 / 100) are enforced; the 16MB limits are documented as not enforced. This is a deliberate simplification, not a correction — the parent spec's "16MB" was aspirational.
+1. **16MB size limits.** For BatchWriteItem, 25 items at the 400KB item cap = 10MB — the count limit is the only practical guardrail; the 16MB aggregate cap is structurally unreachable and remains unenforced. BatchGetItem's response-side 16MB limit (reachable: 100 keys × 400KB = 40MB) was **resolved by M6c W6 (2026-08-03)**: the engine enforces exactly 16MiB of W1 item accounting (pre-projection, whole-response accumulator) and spills overflow keys into `UnprocessedKeys` — the "UnprocessedKeys always empty" invariant below is broken. See `2026-08-03-m6c-hardening-design.md` §6.3.
 
 2. **"TTL filtering" on BatchGetItem is reversed by M5a.** M5a §2.1 reversed the parent spec's synchronous read-path filtering: expired items are never filtered from any read path. BatchGetItem follows the Faithful model — expired items are returned exactly like unexpired ones. No SQL `WHERE ttl <= now` predicate.
 
@@ -355,8 +355,8 @@ These behaviors deliberately diverge from dynamodb-local (which supports project
 4. **Duplicate keys rejected, not deduplicated.** Both BatchWriteItem and BatchGetItem reject duplicate keys in the same table with `ValidationException: Provided list of item keys contains duplicates` (probe-confirmed).
 5. **BatchGetItem deterministically sorts each table's items by key ascending.** Response items are sorted by primary key ascending (hash, then range). dynamodb-local's order is arbitrary and non-reproducible (§2.2), so this is a **documented divergence where the mock is more deterministic than the reference** — the dual-target ordering case asserts the key set only (§6.2).
 6. **Nonexistent keys omitted from BatchGetItem responses.** Not in `Responses`, not in `UnprocessedKeys`, not an error (probe-confirmed).
-7. **Count limits only, no 16MB size enforcement.** 25 (BatchWriteItem) / 100 (BatchGetItem). The 16MB limit is unreachable in practice for BatchWriteItem (25 × 400KB = 10MB) and is a response-side limit for BatchGetItem that contradicts "UnprocessedKeys always empty." Documented as not enforced.
-8. **`UnprocessedItems`/`UnprocessedKeys` always empty.** No throttling in v1. All valid requests are processed.
+7. **Count limits; BatchGetItem 16MiB response cap enforced by M6c W6.** 25 (BatchWriteItem) / 100 (BatchGetItem). BatchWriteItem's 16MB aggregate limit is unreachable in practice (25 × 400KB = 10MB) and remains unenforced; BatchGetItem's response-side cap is enforced (M6c W6): items measured by W1 accounting pre-projection, one whole-response accumulator, overflow spills to `UnprocessedKeys`.
+8. **`UnprocessedItems` always empty; `UnprocessedKeys` empty unless the 16MiB cap trips.** No throttling in v1, so BatchWriteItem requests are never spilled. BatchGetItem spills only on response-cap overflow (M6c W6).
 9. **No TTL read filtering on BatchGetItem.** Consistent with M5a's Faithful model — expired items returned like unexpired ones.
 10. **`ProjectionExpression`/`ExpressionAttributeNames` rejected on BatchGetItem.** V1 non-goal; rejected with `ValidationException` rather than silently ignored, so tests don't believe a projection was applied.
 11. **BatchGetItem tx released by rollback.** Read-only tx — no writes to commit (matching `DescribeTable`/`DescribeTimeToLive`).
@@ -381,7 +381,7 @@ These behaviors deliberately diverge from dynamodb-local (which supports project
 
 ### 7.3 Explicitly out of scope for M5b
 
-- 16MB request/response size limits (documented, not enforced; the BatchGetItem response-side limit is reachable in principle — 100 × 400KB = 40MB — where real DynamoDB paginates into `UnprocessedKeys` and the engine returns everything: a documented divergence).
+- ~~16MB request/response size limits~~ — resolved by M6c W6 (2026-08-03) for BatchGetItem (16MiB response cap enforced with `UnprocessedKeys` spill); BatchWriteItem's 16MB aggregate limit remains unenforced (structurally unreachable: 25 × 400KB = 10MB).
 - `ProjectionExpression` / `ExpressionAttributeNames` / `AttributesToGet` on `BatchGetItem` (rejected, v1 non-goal — a deliberate divergence from dynamodb-local, covered by adapter-only tests §6.3).
 - `ReturnConsumedCapacity` / `ReturnItemCollectionMetrics` accounting (accepted, ignored).
 - `TransactWriteItems` / `TransactGetItems` (v1 non-goal, parent spec §8).

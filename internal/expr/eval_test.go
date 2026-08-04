@@ -95,7 +95,8 @@ func TestEvalComparisons(t *testing.T) {
 		{"cross-type equality is false", "s = :n", nil, false},
 		{"cross-type inequality is true", "s <> :n", nil, true},
 		{"ordered comparison across types is false", "s < :n", nil, false},
-		{"ordered comparison on BOOL is false", "bool < :bool", nil, false},
+		// Non-scalar :value operands on ordering comparators are rejected at
+		// Bind time (see TestBindOrderingOperandType); pinned below.
 		{"ordered comparison on a list is false", "l < :s", nil, false},
 		{"ordered comparison on a set is false", "ss > :s", nil, false},
 
@@ -116,6 +117,14 @@ func TestEvalComparisons(t *testing.T) {
 			}
 		})
 	}
+	// A non-scalar :value operand (here BOOL) on an ordering comparator is a
+	// bind-time ValidationException, not a false result (W8 #2).
+	t.Run("ordered comparison on BOOL is a bind error", func(t *testing.T) {
+		_, err := evalWithEnv(t, "bool < :bool", item, nil, vals)
+		if !errors.Is(err, ErrSemantic) {
+			t.Errorf("eval(%q) err = %v, want ErrSemantic", "bool < :bool", err)
+		}
+	})
 }
 
 func TestEvalNestedPaths(t *testing.T) {

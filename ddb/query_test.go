@@ -95,13 +95,13 @@ func TestQueryBasic(t *testing.T) {
 	c := newClient(t)
 	ctx := context.Background()
 	c.CreateTable(ctx, CreateTableInput{
-		TableName:            "T",
+		TableName:            "Tbl",
 		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}, {AttributeName: "sk", KeyType: "RANGE"}},
 		AttributeDefinitions: []AttributeDefinition{{AttributeName: "pk", AttributeType: "S"}, {AttributeName: "sk", AttributeType: "N"}},
 	})
 
 	for i := range 5 {
-		c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
+		c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
 			"pk":  attrval.NewString("p1"),
 			"sk":  attrval.NewNumber(mustNum(fmt.Sprintf("%d", i))),
 			"val": attrval.NewString(fmt.Sprintf("v%d", i)),
@@ -109,7 +109,7 @@ func TestQueryBasic(t *testing.T) {
 	}
 
 	out, err := c.Query(ctx, QueryInput{
-		TableName:                 "T",
+		TableName:                 "Tbl",
 		KeyConditionExpression:    "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{":pk": attrval.NewString("p1")},
 	})
@@ -133,7 +133,7 @@ func TestQueryWithLimit(t *testing.T) {
 	createQueryTable(t, c, ctx, 10) // 10 items in partition p1
 
 	out, err := c.Query(ctx, QueryInput{
-		TableName:                 "T",
+		TableName:                 "Tbl",
 		KeyConditionExpression:    "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{":pk": attrval.NewString("p1")},
 		Limit:                     3,
@@ -155,7 +155,7 @@ func TestQueryLimitEqualsAvailable(t *testing.T) {
 	createQueryTable(t, c, ctx, 10)
 
 	out, err := c.Query(ctx, QueryInput{
-		TableName:                 "T",
+		TableName:                 "Tbl",
 		KeyConditionExpression:    "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{":pk": attrval.NewString("p1")},
 		Limit:                     10,
@@ -172,7 +172,7 @@ func TestQueryLimitEqualsAvailable(t *testing.T) {
 
 	// Resume: should be empty trailing page.
 	out2, err := c.Query(ctx, QueryInput{
-		TableName:                 "T",
+		TableName:                 "Tbl",
 		KeyConditionExpression:    "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{":pk": attrval.NewString("p1")},
 		Limit:                     10,
@@ -195,7 +195,7 @@ func TestQueryLimitExceedsAvailable(t *testing.T) {
 	createQueryTable(t, c, ctx, 10)
 
 	out, err := c.Query(ctx, QueryInput{
-		TableName:                 "T",
+		TableName:                 "Tbl",
 		KeyConditionExpression:    "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{":pk": attrval.NewString("p1")},
 		Limit:                     15,
@@ -217,7 +217,7 @@ func TestQueryFilterExpression(t *testing.T) {
 	createQueryTable(t, c, ctx, 10)
 
 	out, err := c.Query(ctx, QueryInput{
-		TableName:              "T",
+		TableName:              "Tbl",
 		KeyConditionExpression: "pk = :pk",
 		FilterExpression:       "val = :match",
 		ExpressionAttributeValues: map[string]attrval.Value{
@@ -247,7 +247,7 @@ func TestQueryScanIndexForwardFalse(t *testing.T) {
 	createQueryTable(t, c, ctx, 5)
 
 	out, err := c.Query(ctx, QueryInput{
-		TableName:                 "T",
+		TableName:                 "Tbl",
 		KeyConditionExpression:    "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{":pk": attrval.NewString("p1")},
 		ScanIndexForward:          false,
@@ -271,7 +271,7 @@ func TestQuerySelectCount(t *testing.T) {
 	createQueryTable(t, c, ctx, 5)
 
 	out, err := c.Query(ctx, QueryInput{
-		TableName:                 "T",
+		TableName:                 "Tbl",
 		KeyConditionExpression:    "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{":pk": attrval.NewString("p1")},
 		Select:                    "COUNT",
@@ -297,7 +297,7 @@ func TestQueryExclusiveStartKeyMismatch(t *testing.T) {
 	createQueryTable(t, c, ctx, 5)
 
 	_, err := c.Query(ctx, QueryInput{
-		TableName:                 "T",
+		TableName:                 "Tbl",
 		KeyConditionExpression:    "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{":pk": attrval.NewString("p1")},
 		ExclusiveStartKey:         Item{"pk": attrval.NewString("WRONG"), "sk": attrval.NewNumber(mustNum("0"))},
@@ -311,13 +311,13 @@ func TestQueryBeginsWithOnNumber(t *testing.T) {
 	c := newClient(t)
 	ctx := context.Background()
 	c.CreateTable(ctx, CreateTableInput{
-		TableName:            "T",
+		TableName:            "Tbl",
 		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}, {AttributeName: "sk", KeyType: "RANGE"}},
 		AttributeDefinitions: []AttributeDefinition{{AttributeName: "pk", AttributeType: "S"}, {AttributeName: "sk", AttributeType: "N"}},
 	})
 
 	_, err := c.Query(ctx, QueryInput{
-		TableName:              "T",
+		TableName:              "Tbl",
 		KeyConditionExpression: "pk = :pk AND begins_with(sk, :pre)",
 		ExpressionAttributeValues: map[string]attrval.Value{
 			":pk":  attrval.NewString("p1"),
@@ -340,12 +340,12 @@ func TestQueryBeginsWithOnStringSortKey(t *testing.T) {
 	c := newClient(t)
 	ctx := context.Background()
 	c.CreateTable(ctx, CreateTableInput{
-		TableName:            "T",
+		TableName:            "Tbl",
 		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}, {AttributeName: "sk", KeyType: "RANGE"}},
 		AttributeDefinitions: []AttributeDefinition{{AttributeName: "pk", AttributeType: "S"}, {AttributeName: "sk", AttributeType: "S"}},
 	})
 	for _, sk := range []string{"apple", "apricot", "avocado", "banana", "cherry"} {
-		c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
+		c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
 			"pk":  attrval.NewString("p1"),
 			"sk":  attrval.NewString(sk),
 			"val": attrval.NewString(sk),
@@ -355,7 +355,7 @@ func TestQueryBeginsWithOnStringSortKey(t *testing.T) {
 	// begins_with(sk, "ap") matches apple and apricot; must exclude
 	// avocado (starts with "av"), banana, and cherry.
 	out, err := c.Query(ctx, QueryInput{
-		TableName:              "T",
+		TableName:              "Tbl",
 		KeyConditionExpression: "pk = :pk AND begins_with(sk, :pre)",
 		ExpressionAttributeValues: map[string]attrval.Value{
 			":pk":  attrval.NewString("p1"),
@@ -389,12 +389,12 @@ func TestQueryBeginsWithOnStringSortKey(t *testing.T) {
 func createQueryTable(t *testing.T, c *Client, ctx context.Context, n int) {
 	t.Helper()
 	c.CreateTable(ctx, CreateTableInput{
-		TableName:            "T",
+		TableName:            "Tbl",
 		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}, {AttributeName: "sk", KeyType: "RANGE"}},
 		AttributeDefinitions: []AttributeDefinition{{AttributeName: "pk", AttributeType: "S"}, {AttributeName: "sk", AttributeType: "N"}},
 	})
 	for i := range n {
-		c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
+		c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
 			"pk":  attrval.NewString("p1"),
 			"sk":  attrval.NewNumber(mustNum(fmt.Sprintf("%d", i))),
 			"val": attrval.NewString(fmt.Sprintf("v%d", i)),
@@ -407,7 +407,7 @@ func TestScanBasic(t *testing.T) {
 	ctx := context.Background()
 	createQueryTable(t, c, ctx, 5)
 
-	out, err := c.Scan(ctx, ScanInput{TableName: "T"})
+	out, err := c.Scan(ctx, ScanInput{TableName: "Tbl"})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestScanWithLimit(t *testing.T) {
 	ctx := context.Background()
 	createQueryTable(t, c, ctx, 10)
 
-	out, err := c.Scan(ctx, ScanInput{TableName: "T", Limit: 3})
+	out, err := c.Scan(ctx, ScanInput{TableName: "Tbl", Limit: 3})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -444,7 +444,7 @@ func TestScanPagination(t *testing.T) {
 	var got []Item
 	var start Item
 	for {
-		out, err := c.Scan(ctx, ScanInput{TableName: "T", Limit: 3, ExclusiveStartKey: start})
+		out, err := c.Scan(ctx, ScanInput{TableName: "Tbl", Limit: 3, ExclusiveStartKey: start})
 		if err != nil {
 			t.Fatalf("Scan: %v", err)
 		}
@@ -465,7 +465,7 @@ func TestQueryNegativeLimit(t *testing.T) {
 	createQueryTable(t, c, ctx, 5)
 
 	_, err := c.Query(ctx, QueryInput{
-		TableName:                 "T",
+		TableName:                 "Tbl",
 		KeyConditionExpression:    "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{":pk": attrval.NewString("p1")},
 		Limit:                     -1,
@@ -480,7 +480,7 @@ func TestScanNegativeLimit(t *testing.T) {
 	ctx := context.Background()
 	createQueryTable(t, c, ctx, 5)
 
-	_, err := c.Scan(ctx, ScanInput{TableName: "T", Limit: -1})
+	_, err := c.Scan(ctx, ScanInput{TableName: "Tbl", Limit: -1})
 	if !errors.Is(err, ErrValidation) {
 		t.Errorf("err = %v, want ErrValidation (negative Limit)", err)
 	}
@@ -491,7 +491,7 @@ func TestScanNegativeTotalSegments(t *testing.T) {
 	ctx := context.Background()
 	createQueryTable(t, c, ctx, 5)
 
-	_, err := c.Scan(ctx, ScanInput{TableName: "T", TotalSegments: -1})
+	_, err := c.Scan(ctx, ScanInput{TableName: "Tbl", TotalSegments: -1})
 	if !errors.Is(err, ErrValidation) {
 		t.Errorf("err = %v, want ErrValidation (negative TotalSegments)", err)
 	}
@@ -502,7 +502,7 @@ func TestQueryProjection(t *testing.T) {
 	createQueryTable(t, c, ctx, 5) // partition p1, sk 0..4, val "v<sk>"
 
 	out, err := c.Query(ctx, QueryInput{
-		TableName:              "T",
+		TableName:              "Tbl",
 		KeyConditionExpression: "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{
 			":pk": attrval.NewString("p1"),
@@ -524,7 +524,7 @@ func TestQueryProjection(t *testing.T) {
 
 	// Projection applied after filter: Count=1, ScannedCount=2 with Limit=2.
 	out, err = c.Query(ctx, QueryInput{
-		TableName:              "T",
+		TableName:              "Tbl",
 		KeyConditionExpression: "pk = :pk",
 		FilterExpression:       "val = :v",
 		ExpressionAttributeValues: map[string]attrval.Value{
@@ -554,7 +554,7 @@ func TestQuerySelectProjectionInteraction(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
 	createQueryTable(t, c, ctx, 3)
 	base := QueryInput{
-		TableName:              "T",
+		TableName:              "Tbl",
 		KeyConditionExpression: "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{
 			":pk": attrval.NewString("p1"),
@@ -593,7 +593,7 @@ func TestScanProjection(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
 	createQueryTable(t, c, ctx, 4)
 
-	out, err := c.Scan(ctx, ScanInput{TableName: "T", ProjectionExpression: "val"})
+	out, err := c.Scan(ctx, ScanInput{TableName: "Tbl", ProjectionExpression: "val"})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -608,10 +608,10 @@ func TestScanProjection(t *testing.T) {
 
 	// Gate broadening: names-only and values-only requests now hit the
 	// unused-substitution check (previously values-only escaped it).
-	if _, err := c.Scan(ctx, ScanInput{TableName: "T", ExpressionAttributeNames: map[string]string{"#x": "val"}}); !errors.Is(err, ErrValidation) {
+	if _, err := c.Scan(ctx, ScanInput{TableName: "Tbl", ExpressionAttributeNames: map[string]string{"#x": "val"}}); !errors.Is(err, ErrValidation) {
 		t.Errorf("names-only: err = %v, want ErrValidation", err)
 	}
-	if _, err := c.Scan(ctx, ScanInput{TableName: "T", ExpressionAttributeValues: map[string]attrval.Value{":x": attrval.NewString("y")}}); !errors.Is(err, ErrValidation) {
+	if _, err := c.Scan(ctx, ScanInput{TableName: "Tbl", ExpressionAttributeValues: map[string]attrval.Value{":x": attrval.NewString("y")}}); !errors.Is(err, ErrValidation) {
 		t.Errorf("values-only: err = %v, want ErrValidation", err)
 	}
 }
@@ -620,7 +620,7 @@ func TestQueryGsiProjectionRestriction(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
 	// pk HASH S; GSI gkeys KEYS_ONLY on gsi_pk; GSI gincl INCLUDE [proj1] on gsi_pk.
 	if _, err := c.CreateTable(ctx, CreateTableInput{
-		TableName: "T",
+		TableName: "Tbl",
 		KeySchema: []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
 		AttributeDefinitions: []AttributeDefinition{
 			{AttributeName: "pk", AttributeType: "S"},
@@ -641,7 +641,7 @@ func TestQueryGsiProjectionRestriction(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTable: %v", err)
 	}
-	if _, err := c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
+	if _, err := c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
 		"pk": attrval.NewString("A"), "gsi_pk": attrval.NewString("G1"),
 		"proj1": attrval.NewString("p"), "extra": attrval.NewString("e"),
 	}}); err != nil {
@@ -649,7 +649,7 @@ func TestQueryGsiProjectionRestriction(t *testing.T) {
 	}
 	q := func(index, proj string) (QueryOutput, error) {
 		return c.Query(ctx, QueryInput{
-			TableName:              "T",
+			TableName:              "Tbl",
 			IndexName:              index,
 			KeyConditionExpression: "gsi_pk = :g",
 			ExpressionAttributeValues: map[string]attrval.Value{
@@ -682,7 +682,7 @@ func TestQueryGsiProjectionRestriction(t *testing.T) {
 	// ALL-projected GSI (no restriction) is covered by the adapter
 	// conformance suite; here verify base-table Query is unrestricted.
 	if _, err := c.Query(ctx, QueryInput{
-		TableName:              "T",
+		TableName:              "Tbl",
 		KeyConditionExpression: "pk = :pk",
 		ExpressionAttributeValues: map[string]attrval.Value{
 			":pk": attrval.NewString("A"),
@@ -693,13 +693,13 @@ func TestQueryGsiProjectionRestriction(t *testing.T) {
 	}
 
 	// GSI Scan applies the same restriction (spec §4.4).
-	if _, err := c.Scan(ctx, ScanInput{TableName: "T", IndexName: "gkeys", ProjectionExpression: "extra"}); !errors.Is(err, ErrValidation) {
+	if _, err := c.Scan(ctx, ScanInput{TableName: "Tbl", IndexName: "gkeys", ProjectionExpression: "extra"}); !errors.Is(err, ErrValidation) {
 		t.Errorf("gkeys Scan project extra: err = %v, want ErrValidation", err)
 	}
 
 	// ALL_PROJECTED_ATTRIBUTES + projection on a GSI -> ErrValidation.
 	if _, err := c.Query(ctx, QueryInput{
-		TableName:              "T",
+		TableName:              "Tbl",
 		IndexName:              "gincl",
 		KeyConditionExpression: "gsi_pk = :g",
 		ExpressionAttributeValues: map[string]attrval.Value{

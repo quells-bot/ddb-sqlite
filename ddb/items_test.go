@@ -30,9 +30,9 @@ func allTypesItem() Item {
 func TestPutItemAllTypes(t *testing.T) {
 	c := newClient(t)
 	ctx := context.Background()
-	c.CreateTable(ctx, CreateTableInput{TableName: "T", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
+	c.CreateTable(ctx, CreateTableInput{TableName: "Tbl", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
 
-	if _, err := c.PutItem(ctx, PutItemInput{TableName: "T", Item: allTypesItem()}); err != nil {
+	if _, err := c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: allTypesItem()}); err != nil {
 		t.Fatalf("PutItem: %v", err)
 	}
 }
@@ -40,14 +40,14 @@ func TestPutItemAllTypes(t *testing.T) {
 func TestPutItemValidation(t *testing.T) {
 	c := newClient(t)
 	ctx := context.Background()
-	c.CreateTable(ctx, CreateTableInput{TableName: "T", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
+	c.CreateTable(ctx, CreateTableInput{TableName: "Tbl", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
 
 	// Missing partition key.
-	if _, err := c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{"other": attrval.NewString("x")}}); !errors.Is(err, ErrValidation) {
+	if _, err := c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{"other": attrval.NewString("x")}}); !errors.Is(err, ErrValidation) {
 		t.Errorf("missing key: err = %v, want ErrValidation", err)
 	}
 	// Type mismatch: declared S, supplied N.
-	if _, err := c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{"pk": attrval.NewNumber(mustNum("1"))}}); !errors.Is(err, ErrValidation) {
+	if _, err := c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{"pk": attrval.NewNumber(mustNum("1"))}}); !errors.Is(err, ErrValidation) {
 		t.Errorf("type mismatch: err = %v, want ErrValidation", err)
 	}
 }
@@ -55,11 +55,34 @@ func TestPutItemValidation(t *testing.T) {
 func TestPutItemSizeLimit(t *testing.T) {
 	c := newClient(t)
 	ctx := context.Background()
-	c.CreateTable(ctx, CreateTableInput{TableName: "T", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
+	c.CreateTable(ctx, CreateTableInput{TableName: "Tbl", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
 
-	big := Item{"pk": attrval.NewString("k"), "data": attrval.NewString(strings.Repeat("x", 400*1024+1))}
-	if _, err := c.PutItem(ctx, PutItemInput{TableName: "T", Item: big}); !errors.Is(err, ErrValidation) {
+	// Exactly 409600 bytes: accepted (probe-verified).
+	ok := Item{"pk": attrval.NewString("k"), "big": attrval.NewString(strings.Repeat("x", 409594))}
+	if _, err := c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: ok}); err != nil {
+		t.Fatalf("exact-boundary item: err = %v, want nil", err)
+	}
+
+	// 409601 bytes: rejected.
+	over := Item{"pk": attrval.NewString("k"), "big": attrval.NewString(strings.Repeat("x", 409595))}
+	if _, err := c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: over}); !errors.Is(err, ErrValidation) {
 		t.Errorf("oversized: err = %v, want ErrValidation", err)
+	}
+}
+
+func TestPutItemDepthLimit(t *testing.T) {
+	c := newClient(t)
+	ctx := context.Background()
+	c.CreateTable(ctx, CreateTableInput{TableName: "Tbl", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
+
+	// Build a 33-level-deep nested map: depth 33 -> rejected.
+	inner := attrval.NewString("leaf")
+	for i := 0; i < 32; i++ {
+		inner = attrval.NewMap(map[string]attrval.Value{"d": inner})
+	}
+	deep := Item{"pk": attrval.NewString("k"), "nest": inner}
+	if _, err := c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: deep}); !errors.Is(err, ErrValidation) {
+		t.Errorf("depth 33: err = %v, want ErrValidation", err)
 	}
 }
 
@@ -81,12 +104,12 @@ func mustNum(s string) num.Decimal {
 func TestGetItem(t *testing.T) {
 	c := newClient(t)
 	ctx := context.Background()
-	c.CreateTable(ctx, CreateTableInput{TableName: "T", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
+	c.CreateTable(ctx, CreateTableInput{TableName: "Tbl", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
 
 	in := allTypesItem()
-	c.PutItem(ctx, PutItemInput{TableName: "T", Item: in})
+	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: in})
 
-	out, err := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("user#1")}})
+	out, err := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("user#1")}})
 	if err != nil {
 		t.Fatalf("GetItem: %v", err)
 	}
@@ -101,9 +124,9 @@ func TestGetItem(t *testing.T) {
 func TestGetItemMissing(t *testing.T) {
 	c := newClient(t)
 	ctx := context.Background()
-	c.CreateTable(ctx, CreateTableInput{TableName: "T", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
+	c.CreateTable(ctx, CreateTableInput{TableName: "Tbl", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
 
-	out, err := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("nope")}})
+	out, err := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("nope")}})
 	if err != nil {
 		t.Fatalf("GetItem missing: %v", err)
 	}
@@ -115,14 +138,14 @@ func TestGetItemMissing(t *testing.T) {
 func TestGetItemKeyValidation(t *testing.T) {
 	c := newClient(t)
 	ctx := context.Background()
-	c.CreateTable(ctx, CreateTableInput{TableName: "T", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
+	c.CreateTable(ctx, CreateTableInput{TableName: "Tbl", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
 
 	// Extra attribute in key.
-	if _, err := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("k"), "extra": attrval.NewString("x")}}); !errors.Is(err, ErrValidation) {
+	if _, err := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("k"), "extra": attrval.NewString("x")}}); !errors.Is(err, ErrValidation) {
 		t.Errorf("extra key attr: err = %v, want ErrValidation", err)
 	}
 	// Missing key attribute.
-	if _, err := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{}}); !errors.Is(err, ErrValidation) {
+	if _, err := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{}}); !errors.Is(err, ErrValidation) {
 		t.Errorf("missing key attr: err = %v, want ErrValidation", err)
 	}
 }
@@ -130,12 +153,12 @@ func TestGetItemKeyValidation(t *testing.T) {
 func TestPutOverwriteThenGet(t *testing.T) {
 	c := newClient(t)
 	ctx := context.Background()
-	c.CreateTable(ctx, CreateTableInput{TableName: "T", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
+	c.CreateTable(ctx, CreateTableInput{TableName: "Tbl", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
 
-	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{"pk": attrval.NewString("k"), "v": attrval.NewString("first")}})
-	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{"pk": attrval.NewString("k"), "v": attrval.NewString("second")}})
+	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{"pk": attrval.NewString("k"), "v": attrval.NewString("first")}})
+	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{"pk": attrval.NewString("k"), "v": attrval.NewString("second")}})
 
-	out, _ := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("k")}})
+	out, _ := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("k")}})
 	if out.Item["v"].Str() != "second" {
 		t.Errorf("after overwrite, v = %q, want second", out.Item["v"].Str())
 	}
@@ -144,19 +167,19 @@ func TestPutOverwriteThenGet(t *testing.T) {
 func TestDeleteItem(t *testing.T) {
 	c := newClient(t)
 	ctx := context.Background()
-	c.CreateTable(ctx, CreateTableInput{TableName: "T", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
-	c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{"pk": attrval.NewString("k"), "v": attrval.NewString("x")}})
+	c.CreateTable(ctx, CreateTableInput{TableName: "Tbl", KeySchema: []KeySchemaElement{{"pk", "HASH"}}, AttributeDefinitions: []AttributeDefinition{{"pk", "S"}}})
+	c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{"pk": attrval.NewString("k"), "v": attrval.NewString("x")}})
 
-	if _, err := c.DeleteItem(ctx, DeleteItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("k")}}); err != nil {
+	if _, err := c.DeleteItem(ctx, DeleteItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("k")}}); err != nil {
 		t.Fatalf("DeleteItem: %v", err)
 	}
-	out, _ := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("k")}})
+	out, _ := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("k")}})
 	if len(out.Item) != 0 {
 		t.Errorf("after delete, item = %+v, want empty", out.Item)
 	}
 
 	// Idempotent delete of missing key.
-	if _, err := c.DeleteItem(ctx, DeleteItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("k")}}); err != nil {
+	if _, err := c.DeleteItem(ctx, DeleteItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("k")}}); err != nil {
 		t.Errorf("delete missing: %v, want nil", err)
 	}
 }
@@ -181,11 +204,11 @@ func mustCreateTable(t *testing.T, c *Client, name string) {
 
 func TestPutItemConditionSucceeds(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
-	mustCreateTable(t, c, "T")
+	mustCreateTable(t, c, "Tbl")
 
 	// attribute_not_exists on a fresh key succeeds.
 	_, err := c.PutItem(ctx, PutItemInput{
-		TableName:           "T",
+		TableName:           "Tbl",
 		Item:                Item{"pk": attrval.NewString("k"), "v": attrval.NewString("first")},
 		ConditionExpression: "attribute_not_exists(pk)",
 	})
@@ -196,16 +219,16 @@ func TestPutItemConditionSucceeds(t *testing.T) {
 
 func TestPutItemConditionFails(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
-	mustCreateTable(t, c, "T")
+	mustCreateTable(t, c, "Tbl")
 	if _, err := c.PutItem(ctx, PutItemInput{
-		TableName: "T",
+		TableName: "Tbl",
 		Item:      Item{"pk": attrval.NewString("k"), "v": attrval.NewString("first")},
 	}); err != nil {
 		t.Fatalf("seed PutItem: %v", err)
 	}
 
 	_, err := c.PutItem(ctx, PutItemInput{
-		TableName:           "T",
+		TableName:           "Tbl",
 		Item:                Item{"pk": attrval.NewString("k"), "v": attrval.NewString("second")},
 		ConditionExpression: "attribute_not_exists(pk)",
 	})
@@ -214,7 +237,7 @@ func TestPutItemConditionFails(t *testing.T) {
 	}
 
 	// The failed write must not have taken effect.
-	out, err := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("k")}})
+	out, err := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("k")}})
 	if err != nil {
 		t.Fatalf("GetItem: %v", err)
 	}
@@ -225,16 +248,16 @@ func TestPutItemConditionFails(t *testing.T) {
 
 func TestPutItemConditionOnExistingValue(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
-	mustCreateTable(t, c, "T")
+	mustCreateTable(t, c, "Tbl")
 	if _, err := c.PutItem(ctx, PutItemInput{
-		TableName: "T",
+		TableName: "Tbl",
 		Item:      Item{"pk": attrval.NewString("k"), "v": attrval.NewString("first")},
 	}); err != nil {
 		t.Fatalf("seed PutItem: %v", err)
 	}
 
 	_, err := c.PutItem(ctx, PutItemInput{
-		TableName:                 "T",
+		TableName:                 "Tbl",
 		Item:                      Item{"pk": attrval.NewString("k"), "v": attrval.NewString("second")},
 		ConditionExpression:       "#a = :want",
 		ExpressionAttributeNames:  map[string]string{"#a": "v"},
@@ -247,11 +270,11 @@ func TestPutItemConditionOnExistingValue(t *testing.T) {
 
 func TestPutItemReturnValuesAllOld(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
-	mustCreateTable(t, c, "T")
+	mustCreateTable(t, c, "Tbl")
 
 	// No prior item -> no Attributes.
 	out, err := c.PutItem(ctx, PutItemInput{
-		TableName:    "T",
+		TableName:    "Tbl",
 		Item:         Item{"pk": attrval.NewString("k"), "v": attrval.NewString("first")},
 		ReturnValues: "ALL_OLD",
 	})
@@ -264,7 +287,7 @@ func TestPutItemReturnValuesAllOld(t *testing.T) {
 
 	// Overwrite -> the previous item comes back.
 	out, err = c.PutItem(ctx, PutItemInput{
-		TableName:    "T",
+		TableName:    "Tbl",
 		Item:         Item{"pk": attrval.NewString("k"), "v": attrval.NewString("second")},
 		ReturnValues: "ALL_OLD",
 	})
@@ -278,9 +301,9 @@ func TestPutItemReturnValuesAllOld(t *testing.T) {
 
 func TestPutItemReturnValuesRejected(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
-	mustCreateTable(t, c, "T")
+	mustCreateTable(t, c, "Tbl")
 	_, err := c.PutItem(ctx, PutItemInput{
-		TableName:    "T",
+		TableName:    "Tbl",
 		Item:         Item{"pk": attrval.NewString("k")},
 		ReturnValues: "ALL_NEW",
 	})
@@ -291,16 +314,16 @@ func TestPutItemReturnValuesRejected(t *testing.T) {
 
 func TestPutItemConditionFailureCarriesItem(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
-	mustCreateTable(t, c, "T")
+	mustCreateTable(t, c, "Tbl")
 	if _, err := c.PutItem(ctx, PutItemInput{
-		TableName: "T",
+		TableName: "Tbl",
 		Item:      Item{"pk": attrval.NewString("k"), "v": attrval.NewString("first")},
 	}); err != nil {
 		t.Fatalf("seed PutItem: %v", err)
 	}
 
 	_, err := c.PutItem(ctx, PutItemInput{
-		TableName:                           "T",
+		TableName:                           "Tbl",
 		Item:                                Item{"pk": attrval.NewString("k")},
 		ConditionExpression:                 "attribute_not_exists(pk)",
 		ReturnValuesOnConditionCheckFailure: "ALL_OLD",
@@ -316,9 +339,9 @@ func TestPutItemConditionFailureCarriesItem(t *testing.T) {
 
 func TestPutItemBadExpression(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
-	mustCreateTable(t, c, "T")
+	mustCreateTable(t, c, "Tbl")
 	_, err := c.PutItem(ctx, PutItemInput{
-		TableName:           "T",
+		TableName:           "Tbl",
 		Item:                Item{"pk": attrval.NewString("k")},
 		ConditionExpression: "attribute_exists(",
 	})
@@ -329,16 +352,16 @@ func TestPutItemBadExpression(t *testing.T) {
 
 func TestDeleteItemConditionSucceeds(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
-	mustCreateTable(t, c, "T")
+	mustCreateTable(t, c, "Tbl")
 	if _, err := c.PutItem(ctx, PutItemInput{
-		TableName: "T",
+		TableName: "Tbl",
 		Item:      Item{"pk": attrval.NewString("k"), "v": attrval.NewString("first")},
 	}); err != nil {
 		t.Fatalf("seed PutItem: %v", err)
 	}
 
 	if _, err := c.DeleteItem(ctx, DeleteItemInput{
-		TableName:                 "T",
+		TableName:                 "Tbl",
 		Key:                       Item{"pk": attrval.NewString("k")},
 		ConditionExpression:       "#a = :want",
 		ExpressionAttributeNames:  map[string]string{"#a": "v"},
@@ -347,7 +370,7 @@ func TestDeleteItemConditionSucceeds(t *testing.T) {
 		t.Fatalf("conditional DeleteItem: %v", err)
 	}
 
-	out, err := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("k")}})
+	out, err := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("k")}})
 	if err != nil {
 		t.Fatalf("GetItem: %v", err)
 	}
@@ -358,16 +381,16 @@ func TestDeleteItemConditionSucceeds(t *testing.T) {
 
 func TestDeleteItemConditionFails(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
-	mustCreateTable(t, c, "T")
+	mustCreateTable(t, c, "Tbl")
 	if _, err := c.PutItem(ctx, PutItemInput{
-		TableName: "T",
+		TableName: "Tbl",
 		Item:      Item{"pk": attrval.NewString("k"), "v": attrval.NewString("first")},
 	}); err != nil {
 		t.Fatalf("seed PutItem: %v", err)
 	}
 
 	_, err := c.DeleteItem(ctx, DeleteItemInput{
-		TableName:                 "T",
+		TableName:                 "Tbl",
 		Key:                       Item{"pk": attrval.NewString("k")},
 		ConditionExpression:       "#a = :want",
 		ExpressionAttributeNames:  map[string]string{"#a": "v"},
@@ -377,7 +400,7 @@ func TestDeleteItemConditionFails(t *testing.T) {
 		t.Fatalf("err = %v, want ErrConditionalCheck", err)
 	}
 
-	out, err := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("k")}})
+	out, err := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("k")}})
 	if err != nil {
 		t.Fatalf("GetItem: %v", err)
 	}
@@ -388,11 +411,11 @@ func TestDeleteItemConditionFails(t *testing.T) {
 
 func TestDeleteItemConditionOnMissingItem(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
-	mustCreateTable(t, c, "T")
+	mustCreateTable(t, c, "Tbl")
 
 	// A condition against an absent item sees every path as missing.
 	if _, err := c.DeleteItem(ctx, DeleteItemInput{
-		TableName:           "T",
+		TableName:           "Tbl",
 		Key:                 Item{"pk": attrval.NewString("k")},
 		ConditionExpression: "attribute_not_exists(pk)",
 	}); err != nil {
@@ -400,7 +423,7 @@ func TestDeleteItemConditionOnMissingItem(t *testing.T) {
 	}
 
 	_, err := c.DeleteItem(ctx, DeleteItemInput{
-		TableName:           "T",
+		TableName:           "Tbl",
 		Key:                 Item{"pk": attrval.NewString("k")},
 		ConditionExpression: "attribute_exists(pk)",
 	})
@@ -411,16 +434,16 @@ func TestDeleteItemConditionOnMissingItem(t *testing.T) {
 
 func TestDeleteItemReturnValuesAllOld(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
-	mustCreateTable(t, c, "T")
+	mustCreateTable(t, c, "Tbl")
 	if _, err := c.PutItem(ctx, PutItemInput{
-		TableName: "T",
+		TableName: "Tbl",
 		Item:      Item{"pk": attrval.NewString("k"), "v": attrval.NewString("first")},
 	}); err != nil {
 		t.Fatalf("seed PutItem: %v", err)
 	}
 
 	out, err := c.DeleteItem(ctx, DeleteItemInput{
-		TableName:    "T",
+		TableName:    "Tbl",
 		Key:          Item{"pk": attrval.NewString("k")},
 		ReturnValues: "ALL_OLD",
 	})
@@ -433,7 +456,7 @@ func TestDeleteItemReturnValuesAllOld(t *testing.T) {
 
 	// Deleting a missing key is idempotent and returns nothing.
 	out, err = c.DeleteItem(ctx, DeleteItemInput{
-		TableName:    "T",
+		TableName:    "Tbl",
 		Key:          Item{"pk": attrval.NewString("k")},
 		ReturnValues: "ALL_OLD",
 	})
@@ -447,8 +470,8 @@ func TestDeleteItemReturnValuesAllOld(t *testing.T) {
 
 func TestGetItemProjection(t *testing.T) {
 	c, ctx := newClient(t), context.Background()
-	mustCreateTable(t, c, "T")
-	if _, err := c.PutItem(ctx, PutItemInput{TableName: "T", Item: Item{
+	mustCreateTable(t, c, "Tbl")
+	if _, err := c.PutItem(ctx, PutItemInput{TableName: "Tbl", Item: Item{
 		"pk":  attrval.NewString("k"),
 		"top": attrval.NewString("topval"),
 		"num": attrval.NewNumber(mustNum("42")),
@@ -462,7 +485,7 @@ func TestGetItemProjection(t *testing.T) {
 	key := Item{"pk": attrval.NewString("k")}
 
 	// Single attr: only that attr returned — keys are NOT auto-returned.
-	out, err := c.GetItem(ctx, GetItemInput{TableName: "T", Key: key, ProjectionExpression: "top"})
+	out, err := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: key, ProjectionExpression: "top"})
 	if err != nil {
 		t.Fatalf("GetItem: %v", err)
 	}
@@ -472,7 +495,7 @@ func TestGetItemProjection(t *testing.T) {
 
 	// Nested spine + #name substitution.
 	out, err = c.GetItem(ctx, GetItemInput{
-		TableName: "T", Key: key,
+		TableName: "Tbl", Key: key,
 		ProjectionExpression:     "#o.a, num",
 		ExpressionAttributeNames: map[string]string{"#o": "obj"},
 	})
@@ -484,7 +507,7 @@ func TestGetItemProjection(t *testing.T) {
 	}
 
 	// Missing path: omitted, no error.
-	out, err = c.GetItem(ctx, GetItemInput{TableName: "T", Key: key, ProjectionExpression: "ghost"})
+	out, err = c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: key, ProjectionExpression: "ghost"})
 	if err != nil {
 		t.Fatalf("GetItem: %v", err)
 	}
@@ -493,21 +516,108 @@ func TestGetItemProjection(t *testing.T) {
 	}
 
 	// Key not found: unchanged behavior (empty Item, no error).
-	out, err = c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{"pk": attrval.NewString("ghost")}, ProjectionExpression: "top"})
+	out, err = c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{"pk": attrval.NewString("ghost")}, ProjectionExpression: "top"})
 	if err != nil || len(out.Item) != 0 {
 		t.Errorf("not-found: Item = %v err = %v, want empty/nil", out.Item, err)
 	}
 
 	// Overlap and unused names rejected.
-	if _, err := c.GetItem(ctx, GetItemInput{TableName: "T", Key: key, ProjectionExpression: "obj, obj.a"}); !errors.Is(err, ErrValidation) {
+	if _, err := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: key, ProjectionExpression: "obj, obj.a"}); !errors.Is(err, ErrValidation) {
 		t.Errorf("overlap: err = %v, want ErrValidation", err)
 	}
-	if _, err := c.GetItem(ctx, GetItemInput{TableName: "T", Key: key, ExpressionAttributeNames: map[string]string{"#x": "top"}}); !errors.Is(err, ErrValidation) {
+	if _, err := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: key, ExpressionAttributeNames: map[string]string{"#x": "top"}}); !errors.Is(err, ErrValidation) {
 		t.Errorf("unused names: err = %v, want ErrValidation", err)
 	}
 
 	// Table-then-key-then-expression precedence: bad key + bad projection -> key error.
-	if _, err := c.GetItem(ctx, GetItemInput{TableName: "T", Key: Item{}, ProjectionExpression: "a = :v"}); !errors.Is(err, ErrValidation) {
+	if _, err := c.GetItem(ctx, GetItemInput{TableName: "Tbl", Key: Item{}, ProjectionExpression: "a = :v"}); !errors.Is(err, ErrValidation) {
 		t.Errorf("bad key: err = %v, want ErrValidation", err)
+	}
+}
+
+func TestKeyValueLengthLimits(t *testing.T) {
+	c, ctx := newClient(t), context.Background()
+	// Composite table: pk HASH S, sk RANGE S.
+	if _, err := c.CreateTable(ctx, CreateTableInput{
+		TableName:            "Kvs",
+		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}, {AttributeName: "sk", KeyType: "RANGE"}},
+		AttributeDefinitions: []AttributeDefinition{{AttributeName: "pk", AttributeType: "S"}, {AttributeName: "sk", AttributeType: "S"}},
+	}); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+	// Binary-key table: pk HASH B.
+	if _, err := c.CreateTable(ctx, CreateTableInput{
+		TableName:            "Kbs",
+		KeySchema:            []KeySchemaElement{{AttributeName: "pk", KeyType: "HASH"}},
+		AttributeDefinitions: []AttributeDefinition{{AttributeName: "pk", AttributeType: "B"}},
+	}); err != nil {
+		t.Fatalf("CreateTable: %v", err)
+	}
+
+	put := func(table string, item Item) error {
+		_, err := c.PutItem(ctx, PutItemInput{TableName: table, Item: item})
+		return err
+	}
+	strItem := func(pk, sk string) Item {
+		return Item{"pk": attrval.NewString(pk), "sk": attrval.NewString(sk)}
+	}
+
+	cases := []struct {
+		name    string
+		table   string
+		item    Item
+		wantErr bool
+	}{
+		{"pk 2048 accepted", "Kvs", strItem(strings.Repeat("k", 2048), "s"), false},
+		{"pk 2049 rejected", "Kvs", strItem(strings.Repeat("k", 2049), "s"), true},
+		{"sk 1024 accepted", "Kvs", strItem("k", strings.Repeat("s", 1024)), false},
+		{"sk 1025 rejected", "Kvs", strItem("k", strings.Repeat("s", 1025)), true},
+		{"empty pk rejected", "Kvs", strItem("", "s"), true},
+		{"empty sk rejected", "Kvs", strItem("k", ""), true},
+		{"binary pk 2048 accepted", "Kbs", Item{"pk": attrval.NewBinary(make([]byte, 2048))}, false},
+		{"binary pk 2049 rejected", "Kbs", Item{"pk": attrval.NewBinary(make([]byte, 2049))}, true},
+		{"empty binary pk rejected", "Kbs", Item{"pk": attrval.NewBinary([]byte{})}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := put(tc.table, tc.item)
+			if tc.wantErr && !errors.Is(err, ErrValidation) {
+				t.Errorf("err = %v, want ErrValidation", err)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("err = %v, want nil", err)
+			}
+		})
+	}
+
+	// Read paths share the validator via validateKey.
+	if _, err := c.GetItem(ctx, GetItemInput{TableName: "Kvs", Key: strItem(strings.Repeat("k", 2049), "s")}); !errors.Is(err, ErrValidation) {
+		t.Errorf("GetItem oversize pk: err = %v, want ErrValidation", err)
+	}
+	if _, err := c.GetItem(ctx, GetItemInput{TableName: "Kvs", Key: strItem("", "s")}); !errors.Is(err, ErrValidation) {
+		t.Errorf("GetItem empty pk: err = %v, want ErrValidation", err)
+	}
+	if _, err := c.DeleteItem(ctx, DeleteItemInput{TableName: "Kvs", Key: strItem("k", strings.Repeat("s", 1025))}); !errors.Is(err, ErrValidation) {
+		t.Errorf("DeleteItem oversize sk: err = %v, want ErrValidation", err)
+	}
+	if _, err := c.UpdateItem(ctx, UpdateItemInput{TableName: "Kvs", Key: strItem("", "s")}); !errors.Is(err, ErrValidation) {
+		t.Errorf("UpdateItem empty pk: err = %v, want ErrValidation", err)
+	}
+	// BatchWriteItem: one oversize put fails the whole batch.
+	_, err := c.BatchWriteItem(ctx, BatchWriteItemInput{RequestItems: map[string][]WriteRequest{
+		"Kvs": {
+			{Put: &PutRequest{Item: strItem("ok", "s")}},
+			{Put: &PutRequest{Item: strItem(strings.Repeat("k", 2049), "s")}},
+		},
+	}})
+	if !errors.Is(err, ErrValidation) {
+		t.Errorf("BatchWriteItem oversize pk: err = %v, want ErrValidation", err)
+	}
+	// BatchGetItem: oversize key rejected.
+	_, err = c.BatchGetItem(ctx, BatchGetItemInput{RequestItems: map[string]KeysAndAttributes{
+		"Kvs": {Keys: []Item{strItem(strings.Repeat("k", 2049), "s")}},
+	}})
+	if !errors.Is(err, ErrValidation) {
+		t.Errorf("BatchGetItem oversize pk: err = %v, want ErrValidation", err)
 	}
 }

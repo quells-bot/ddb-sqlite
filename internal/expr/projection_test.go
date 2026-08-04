@@ -72,12 +72,7 @@ func TestParseProjection(t *testing.T) {
 			var want []attrval.Path
 			for _, wp := range tc.want {
 				r := make(attrval.Path, len(wp))
-				for i, seg := range wp {
-					if !seg.IsIndex && len(seg.Name) > 0 && seg.Name[0] == '#' {
-						seg.Name = seg.Name // resolves to itself
-					}
-					r[i] = seg
-				}
+				copy(r, wp)
 				want = append(want, r)
 			}
 			if !pathsEq(b.Paths(), want) {

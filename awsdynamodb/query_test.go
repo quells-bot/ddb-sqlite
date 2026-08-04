@@ -41,11 +41,11 @@ func TestAdapterQueryBasic(t *testing.T) {
 	}
 	defer a.Close()
 
-	createCompositeTable(t, a, ctx, "QT")
+	createCompositeTable(t, a, ctx, "Qbl")
 
 	// Seed items with sk 0..4.
 	for i := range 5 {
-		putConf(t, a, ctx, "QT", map[string]types.AttributeValue{
+		putConf(t, a, ctx, "Qbl", map[string]types.AttributeValue{
 			"pk":  strVal("p1"),
 			"sk":  numVal(string(rune('0' + i))),
 			"val": strVal("data"),
@@ -55,7 +55,7 @@ func TestAdapterQueryBasic(t *testing.T) {
 	keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
 	expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
 	out, err := a.Query(ctx, &dynamodb.QueryInput{
-		TableName:                 aws.String("QT"),
+		TableName:                 aws.String("Qbl"),
 		KeyConditionExpression:    expr.KeyCondition(),
 		ExpressionAttributeNames:  expr.Names(),
 		ExpressionAttributeValues: expr.Values(),
@@ -84,10 +84,10 @@ func TestAdapterQueryLimitZero(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer a.Close()
-	mustCreate(t, a, ctx, "T")
+	mustCreate(t, a, ctx, "Tbl")
 
 	_, err = a.Query(ctx, &dynamodb.QueryInput{
-		TableName:                 aws.String("T"),
+		TableName:                 aws.String("Tbl"),
 		KeyConditionExpression:    aws.String("pk = :v"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{":v": strVal("x")},
 		Limit:                     aws.Int32(0),
@@ -102,29 +102,67 @@ func TestAdapterQueryEmptyKeyCondition(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer a.Close()
-	mustCreate(t, a, ctx, "T")
+	mustCreate(t, a, ctx, "Tbl")
 
 	_, err = a.Query(ctx, &dynamodb.QueryInput{
-		TableName:              aws.String("T"),
+		TableName:              aws.String("Tbl"),
 		KeyConditionExpression: aws.String(""),
 	})
 	asValidation(t, err, "empty KeyConditionExpression should be rejected")
 }
 
-func TestAdapterQueryLegacyKeyConditions(t *testing.T) {
+// TestAdapterQueryLegacyRejections pins the W7 audit: every deprecated
+// pre-expression Query parameter is rejected (KeyConditions, QueryFilter,
+// ConditionalOperator, AttributesToGet) rather than silently ignored. The
+// reference honors them; rejection is the adapter's deliberate divergence.
+func TestAdapterQueryLegacyRejections(t *testing.T) {
 	ctx := context.Background()
 	a, err := awsdynamodb.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	defer a.Close()
-	mustCreate(t, a, ctx, "T")
+	createCompositeTable(t, a, ctx, "Qbl")
 
-	_, err = a.Query(ctx, &dynamodb.QueryInput{
-		TableName:     aws.String("T"),
-		KeyConditions: map[string]types.Condition{"pk": {}},
-	})
-	asValidation(t, err, "legacy KeyConditions should be rejected")
+	cases := []struct {
+		name  string
+		input *dynamodb.QueryInput
+	}{
+		{
+			"legacy KeyConditions",
+			&dynamodb.QueryInput{
+				TableName:     aws.String("Qbl"),
+				KeyConditions: map[string]types.Condition{"pk": {}},
+			},
+		},
+		{
+			"legacy QueryFilter",
+			&dynamodb.QueryInput{
+				TableName:   aws.String("Qbl"),
+				QueryFilter: map[string]types.Condition{"v": {}},
+			},
+		},
+		{
+			"legacy ConditionalOperator",
+			&dynamodb.QueryInput{
+				TableName:           aws.String("Qbl"),
+				ConditionalOperator: types.ConditionalOperatorAnd,
+			},
+		},
+		{
+			"legacy AttributesToGet",
+			&dynamodb.QueryInput{
+				TableName:       aws.String("Qbl"),
+				AttributesToGet: []string{"v"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := a.Query(ctx, tc.input)
+			asValidation(t, err, tc.name+" should be rejected")
+		})
+	}
 }
 
 func TestAdapterQueryScanIndexForwardDefaultNil(t *testing.T) {
@@ -136,10 +174,10 @@ func TestAdapterQueryScanIndexForwardDefaultNil(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer a.Close()
-	createCompositeTable(t, a, ctx, "QT")
+	createCompositeTable(t, a, ctx, "Qbl")
 
 	for i := range 5 {
-		putConf(t, a, ctx, "QT", map[string]types.AttributeValue{
+		putConf(t, a, ctx, "Qbl", map[string]types.AttributeValue{
 			"pk": strVal("p1"),
 			"sk": numVal(string(rune('0' + i))),
 		})
@@ -148,7 +186,7 @@ func TestAdapterQueryScanIndexForwardDefaultNil(t *testing.T) {
 	keyExpr := expression.Key("pk").Equal(expression.Value("p1"))
 	expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
 	out, err := a.Query(ctx, &dynamodb.QueryInput{
-		TableName:                 aws.String("QT"),
+		TableName:                 aws.String("Qbl"),
 		KeyConditionExpression:    expr.KeyCondition(),
 		ExpressionAttributeNames:  expr.Names(),
 		ExpressionAttributeValues: expr.Values(),
@@ -172,15 +210,15 @@ func TestAdapterScanBasic(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer a.Close()
-	mustCreate(t, a, ctx, "T")
+	mustCreate(t, a, ctx, "Tbl")
 
 	for i := range 3 {
-		putConf(t, a, ctx, "T", map[string]types.AttributeValue{
+		putConf(t, a, ctx, "Tbl", map[string]types.AttributeValue{
 			"pk": strVal("p" + string(rune('a'+i))),
 		})
 	}
 
-	out, err := a.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String("T")})
+	out, err := a.Scan(ctx, &dynamodb.ScanInput{TableName: aws.String("Tbl")})
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -195,20 +233,50 @@ func TestAdapterScanBasic(t *testing.T) {
 	}
 }
 
-func TestAdapterScanLegacyScanFilter(t *testing.T) {
+// TestAdapterScanLegacyRejections pins the W7 audit: every deprecated
+// pre-expression Scan parameter is rejected (ScanFilter, ConditionalOperator,
+// AttributesToGet) rather than silently ignored.
+func TestAdapterScanLegacyRejections(t *testing.T) {
 	ctx := context.Background()
 	a, err := awsdynamodb.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	defer a.Close()
-	mustCreate(t, a, ctx, "T")
+	mustCreate(t, a, ctx, "Tbl")
 
-	_, err = a.Scan(ctx, &dynamodb.ScanInput{
-		TableName:  aws.String("T"),
-		ScanFilter: map[string]types.Condition{"pk": {}},
-	})
-	asValidation(t, err, "legacy ScanFilter should be rejected")
+	cases := []struct {
+		name  string
+		input *dynamodb.ScanInput
+	}{
+		{
+			"legacy ScanFilter",
+			&dynamodb.ScanInput{
+				TableName:  aws.String("Tbl"),
+				ScanFilter: map[string]types.Condition{"pk": {}},
+			},
+		},
+		{
+			"legacy ConditionalOperator",
+			&dynamodb.ScanInput{
+				TableName:           aws.String("Tbl"),
+				ConditionalOperator: types.ConditionalOperatorAnd,
+			},
+		},
+		{
+			"legacy AttributesToGet",
+			&dynamodb.ScanInput{
+				TableName:       aws.String("Tbl"),
+				AttributesToGet: []string{"v"},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := a.Scan(ctx, tc.input)
+			asValidation(t, err, tc.name+" should be rejected")
+		})
+	}
 }
 
 func TestAdapterCreateTableWithGSI(t *testing.T) {
@@ -216,7 +284,7 @@ func TestAdapterCreateTableWithGSI(t *testing.T) {
 	a, cleanup := newAdapterTarget(t)
 	defer cleanup()
 	_, err := a.CreateTable(ctx, &dynamodb.CreateTableInput{
-		TableName: aws.String("GT"),
+		TableName: aws.String("Gbl"),
 		KeySchema: []types.KeySchemaElement{
 			{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash},
 			{AttributeName: aws.String("sk"), KeyType: types.KeyTypeRange},
@@ -238,7 +306,7 @@ func TestAdapterCreateTableWithGSI(t *testing.T) {
 	}
 	// Query with IndexName should now succeed (not rejected).
 	a.PutItem(ctx, &dynamodb.PutItemInput{
-		TableName: aws.String("GT"),
+		TableName: aws.String("Gbl"),
 		Item: map[string]types.AttributeValue{
 			"pk":  &types.AttributeValueMemberS{Value: "A"},
 			"sk":  &types.AttributeValueMemberS{Value: "a"},
@@ -248,7 +316,7 @@ func TestAdapterCreateTableWithGSI(t *testing.T) {
 	keyExpr := expression.Key("gpk").Equal(expression.Value("G1"))
 	expr := mustExpr(t, expression.NewBuilder().WithKeyCondition(keyExpr))
 	out, err := a.Query(ctx, &dynamodb.QueryInput{
-		TableName:                 aws.String("GT"),
+		TableName:                 aws.String("Gbl"),
 		IndexName:                 aws.String("gsi1"),
 		KeyConditionExpression:    expr.KeyCondition(),
 		ExpressionAttributeNames:  expr.Names(),

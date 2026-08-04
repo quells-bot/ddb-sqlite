@@ -1,6 +1,7 @@
 package expr
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/quells-bot/ddb-sqlite-core/attrval"
@@ -28,6 +29,22 @@ func FuzzParseCondition(f *testing.F) {
 		":",
 		"a..b = :v",
 	}
+	// Boundary-biased seeds (M6c §9): at and just over the W2 limits.
+	// Limits must produce errors, never panics.
+	seeds = append(seeds,
+		// 4KB expression-string limit: 4096 bytes accepted, 4097 ErrLimit.
+		"a = a "+strings.Repeat(" ", 4081)+"AND b = b",
+		"a = a "+strings.Repeat(" ", 4082)+"AND b = b",
+		// Operator-count limit: 299 operators accepted, 301 ErrLimit.
+		strings.Join(repeatStr("a=a", 150), " OR "),
+		strings.Join(repeatStr("a=a", 151), " OR "),
+		// Path depth at/over the 32-segment bind limit (parse accepts both).
+		"a"+strings.Repeat(".b", 31)+" = :v",
+		"a"+strings.Repeat(".b", 32)+" = :v",
+		// IN operand limit: 100 accepted, 101 ErrLimit.
+		"a IN ("+strings.Join(repeatStr(":v", 100), ", ")+")",
+		"a IN ("+strings.Join(repeatStr(":v", 101), ", ")+")",
+	)
 	for _, s := range seeds {
 		f.Add(s)
 	}
@@ -126,6 +143,19 @@ func FuzzParseUpdate(f *testing.F) {
 		"NOPE a = :v",
 		"SET a = :v + :v - :v",
 	}
+	// Boundary-biased seeds (M6c §9): at and just over the W2 limits.
+	seeds = append(seeds,
+		// 4KB expression-string limit: 4096 bytes accepted, 4097 ErrLimit.
+		"SET a = :v"+strings.Repeat(" ", 4086),
+		"SET a = :v"+strings.Repeat(" ", 4087),
+		// Operator-count limit: each "a = a + :v" SET action is 1 operator
+		// (the arithNode; SET '=' is not counted): 300 accepted, 301 ErrLimit.
+		"SET "+strings.Join(repeatStr("a = a + :v", 300), ", "),
+		"SET "+strings.Join(repeatStr("a = a + :v", 301), ", "),
+		// Path depth at/over the 32-segment bind limit (parse accepts both).
+		"SET a"+strings.Repeat(".b", 31)+" = :v",
+		"SET a"+strings.Repeat(".b", 32)+" = :v",
+	)
 	for _, s := range seeds {
 		f.Add(s)
 	}

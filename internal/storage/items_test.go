@@ -16,7 +16,7 @@ func TestPutGetDeleteItem(t *testing.T) {
 	s.CreateDataTable(tx, dataDef())
 
 	blob := []byte("hello")
-	if _, err := s.PutItem(tx, "T", "k1", nil, blob); err != nil {
+	if _, err := s.PutItem(tx, "T", "k1", nil, blob, 0); err != nil {
 		t.Fatalf("PutItem: %v", err)
 	}
 	_, got, found, err := s.GetItem(tx, "T", "k1", nil)
@@ -28,7 +28,7 @@ func TestPutGetDeleteItem(t *testing.T) {
 	}
 
 	// Overwrite.
-	s.PutItem(tx, "T", "k1", nil, []byte("world"))
+	s.PutItem(tx, "T", "k1", nil, []byte("world"), 0)
 	_, got, _, _ = s.GetItem(tx, "T", "k1", nil)
 	if string(got) != "world" {
 		t.Errorf("overwrite = %q, want world", got)
@@ -64,8 +64,8 @@ func TestPutGetItemWithRange(t *testing.T) {
 
 	s.CreateDataTable(tx, TableDef{Name: "R", Hash: "pk", HashType: "S", Range: "sk", RangeType: "S"})
 
-	s.PutItem(tx, "R", "p1", "s1", []byte("a"))
-	s.PutItem(tx, "R", "p1", "s2", []byte("b"))
+	s.PutItem(tx, "R", "p1", "s1", []byte("a"), 0)
+	s.PutItem(tx, "R", "p1", "s2", []byte("b"), 0)
 
 	_, got, found, _ := s.GetItem(tx, "R", "p1", "s2")
 	if !found || string(got) != "b" {
