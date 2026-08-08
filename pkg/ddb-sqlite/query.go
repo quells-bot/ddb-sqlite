@@ -1,4 +1,4 @@
-package awsdynamodb
+package ddbsqlite
 
 import (
 	"context"
@@ -14,16 +14,16 @@ import (
 // rejectLegacyQuery refuses the deprecated pre-expression parameters on Query.
 func rejectLegacyQuery(params *dynamodb.QueryInput) error {
 	if len(params.KeyConditions) > 0 {
-		return &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: Query: the legacy KeyConditions parameter is not supported; use KeyConditionExpression"}
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: Query: the legacy KeyConditions parameter is not supported; use KeyConditionExpression"}
 	}
 	if len(params.QueryFilter) > 0 {
-		return &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: Query: the legacy QueryFilter parameter is not supported; use FilterExpression"}
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: Query: the legacy QueryFilter parameter is not supported; use FilterExpression"}
 	}
 	if params.ConditionalOperator != "" {
-		return &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: Query: the legacy ConditionalOperator parameter is not supported"}
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: Query: the legacy ConditionalOperator parameter is not supported"}
 	}
 	if len(params.AttributesToGet) > 0 {
-		return &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: Query: the legacy AttributesToGet parameter is not supported; use ProjectionExpression"}
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: Query: the legacy AttributesToGet parameter is not supported; use ProjectionExpression"}
 	}
 	return nil
 }
@@ -50,7 +50,7 @@ func (a *Adapter) Query(ctx context.Context, params *dynamodb.QueryInput, optFns
 	// Present-but-zero Limit → ValidationException (only the adapter can
 	// distinguish SDK nil from a pointer to 0).
 	if params.Limit != nil && *params.Limit == 0 {
-		return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: Query: Limit must be greater than or equal to 1"}
+		return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: Query: Limit must be greater than or equal to 1"}
 	}
 	values, err := exprValues(params.ExpressionAttributeValues)
 	if err != nil {
@@ -96,13 +96,13 @@ func (a *Adapter) Query(ctx context.Context, params *dynamodb.QueryInput, optFns
 // rejectLegacyScan refuses the deprecated pre-expression parameters on Scan.
 func rejectLegacyScan(params *dynamodb.ScanInput) error {
 	if len(params.ScanFilter) > 0 {
-		return &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: Scan: the legacy ScanFilter parameter is not supported; use FilterExpression"}
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: Scan: the legacy ScanFilter parameter is not supported; use FilterExpression"}
 	}
 	if params.ConditionalOperator != "" {
-		return &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: Scan: the legacy ConditionalOperator parameter is not supported"}
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: Scan: the legacy ConditionalOperator parameter is not supported"}
 	}
 	if len(params.AttributesToGet) > 0 {
-		return &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: Scan: the legacy AttributesToGet parameter is not supported; use ProjectionExpression"}
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: Scan: the legacy AttributesToGet parameter is not supported; use ProjectionExpression"}
 	}
 	return nil
 }
@@ -124,7 +124,7 @@ func (a *Adapter) Scan(ctx context.Context, params *dynamodb.ScanInput, optFns .
 	}
 	// Present-but-zero Limit → ValidationException.
 	if params.Limit != nil && *params.Limit == 0 {
-		return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: Scan: Limit must be greater than or equal to 1"}
+		return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: Scan: Limit must be greater than or equal to 1"}
 	}
 	values, err := exprValues(params.ExpressionAttributeValues)
 	if err != nil {

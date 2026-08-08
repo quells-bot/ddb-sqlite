@@ -1,4 +1,4 @@
-package awsdynamodb
+package ddbsqlite
 
 import (
 	"fmt"
@@ -50,21 +50,21 @@ func FromSDK(av types.AttributeValue) (attrval.Value, error) {
 		return attrval.NewMap(m), nil
 	case *types.AttributeValueMemberSS:
 		if len(v.Value) == 0 {
-			return attrval.Value{}, fmt.Errorf("awsdynamodb: a StringSet must not be empty")
+			return attrval.Value{}, fmt.Errorf("ddbsqlite: a StringSet must not be empty")
 		}
 		return attrval.NewStringSet(v.Value), nil
 	case *types.AttributeValueMemberNS:
 		if len(v.Value) == 0 {
-			return attrval.Value{}, fmt.Errorf("awsdynamodb: a NumberSet must not be empty")
+			return attrval.Value{}, fmt.Errorf("ddbsqlite: a NumberSet must not be empty")
 		}
 		return attrval.NewNumberSetFromStrings(v.Value)
 	case *types.AttributeValueMemberBS:
 		if len(v.Value) == 0 {
-			return attrval.Value{}, fmt.Errorf("awsdynamodb: a BinarySet must not be empty")
+			return attrval.Value{}, fmt.Errorf("ddbsqlite: a BinarySet must not be empty")
 		}
 		return attrval.NewBinarySet(v.Value), nil
 	default:
-		return attrval.Value{}, fmt.Errorf("awsdynamodb: unsupported AttributeValue type %T", av)
+		return attrval.Value{}, fmt.Errorf("ddbsqlite: unsupported AttributeValue type %T", av)
 	}
 }
 

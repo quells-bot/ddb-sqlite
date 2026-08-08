@@ -1,4 +1,4 @@
-package awsdynamodb_test
+package ddbsqlite_test
 
 import (
 	"context"
@@ -20,11 +20,11 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/ory/dockertest/v4"
 
-	"github.com/quells-bot/ddb-sqlite-core/awsdynamodb"
+	"github.com/quells-bot/ddb-sqlite-core/ddbsqlite"
 )
 
 // api is the minimal interface (exact SDK method signatures) both *dynamodb.Client
-// and *awsdynamodb.Adapter satisfy. The harness is parameterized by it so the
+// and *ddbsqlite.Adapter satisfy. The harness is parameterized by it so the
 // same cases run against the adapter (pass 1) and dynamodb-local (pass 2).
 type api interface {
 	CreateTable(ctx context.Context, params *dynamodb.CreateTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.CreateTableOutput, error)
@@ -77,7 +77,7 @@ func runConformance(t *testing.T, fn func(*testing.T, api)) {
 }
 
 func newAdapterTarget(t *testing.T) (api, func()) {
-	a, err := awsdynamodb.Open(context.Background(), ":memory:")
+	a, err := ddbsqlite.Open(context.Background(), ":memory:")
 	if err != nil {
 		t.Fatalf("adapter Open: %v", err)
 	}
@@ -3412,7 +3412,7 @@ func TestConfLegacyParams(t *testing.T) {
 		mustCreateComposite(t, c, ctx, "ConfT")
 		seedComposite(t, c, ctx, "ConfT", "p1", 3)
 
-		_, isAdapter := c.(*awsdynamodb.Adapter)
+		_, isAdapter := c.(*ddbsqlite.Adapter)
 		_, err := c.Query(ctx, &dynamodb.QueryInput{
 			TableName: aws.String("ConfT"),
 			KeyConditions: map[string]types.Condition{

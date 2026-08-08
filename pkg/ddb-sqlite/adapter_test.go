@@ -1,4 +1,4 @@
-package awsdynamodb_test
+package ddbsqlite_test
 
 import (
 	"context"
@@ -12,11 +12,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/aws/smithy-go"
 
-	"github.com/quells-bot/ddb-sqlite-core/awsdynamodb"
+	"github.com/quells-bot/ddb-sqlite-core/ddbsqlite"
 )
 
 func TestOpenClose(t *testing.T) {
-	a, err := awsdynamodb.Open(context.Background(), ":memory:")
+	a, err := ddbsqlite.Open(context.Background(), ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -28,9 +28,9 @@ func TestOpenClose(t *testing.T) {
 	}
 }
 
-func adapterClient(t *testing.T) *awsdynamodb.Adapter {
+func adapterClient(t *testing.T) *ddbsqlite.Adapter {
 	t.Helper()
-	a, err := awsdynamodb.Open(context.Background(), ":memory:")
+	a, err := ddbsqlite.Open(context.Background(), ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestAdapterGetItemMissingKey(t *testing.T) {
 
 func TestAdapterRejectsLegacyParameters(t *testing.T) {
 	ctx := context.Background()
-	a, err := awsdynamodb.Open(ctx, ":memory:")
+	a, err := ddbsqlite.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestAdapterRejectsLegacyParameters(t *testing.T) {
 
 func TestAdapterRejectsEmptyConditionExpression(t *testing.T) {
 	ctx := context.Background()
-	a, err := awsdynamodb.Open(ctx, ":memory:")
+	a, err := ddbsqlite.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestAdapterRejectsEmptyConditionExpression(t *testing.T) {
 
 func TestAdapterConditionalCheckFailedCarriesItem(t *testing.T) {
 	ctx := context.Background()
-	a, err := awsdynamodb.Open(ctx, ":memory:")
+	a, err := ddbsqlite.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestAdapterConditionalCheckFailedCarriesItem(t *testing.T) {
 	}
 }
 
-func mustAdapterTable(t *testing.T, a *awsdynamodb.Adapter, ctx context.Context, name string) {
+func mustAdapterTable(t *testing.T, a *ddbsqlite.Adapter, ctx context.Context, name string) {
 	t.Helper()
 	if _, err := a.CreateTable(ctx, &dynamodb.CreateTableInput{
 		TableName:            aws.String(name),
@@ -235,7 +235,7 @@ func assertValidation(t *testing.T, err error) {
 // newAdapterTable opens an adapter and creates a single-key table "Tbl".
 // adapterClient is the existing helper in this file; table creation is inline
 // elsewhere, so this wrapper is new.
-func newAdapterTable(t *testing.T) (*awsdynamodb.Adapter, context.Context) {
+func newAdapterTable(t *testing.T) (*ddbsqlite.Adapter, context.Context) {
 	t.Helper()
 	a := adapterClient(t)
 	ctx := context.Background()

@@ -1,4 +1,4 @@
-package awsdynamodb_test
+package ddbsqlite_test
 
 import (
 	"context"
@@ -9,12 +9,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
-	"github.com/quells-bot/ddb-sqlite-core/awsdynamodb"
+	"github.com/quells-bot/ddb-sqlite-core/ddbsqlite"
 )
 
 // createCompositeTable creates a table with a composite (pk HASH S, sk RANGE N)
 // primary key, which Query requires for ordered results.
-func createCompositeTable(t *testing.T, a *awsdynamodb.Adapter, ctx context.Context, name string) {
+func createCompositeTable(t *testing.T, a *ddbsqlite.Adapter, ctx context.Context, name string) {
 	t.Helper()
 	_, err := a.CreateTable(ctx, &dynamodb.CreateTableInput{
 		TableName: aws.String(name),
@@ -35,7 +35,7 @@ func createCompositeTable(t *testing.T, a *awsdynamodb.Adapter, ctx context.Cont
 
 func TestAdapterQueryBasic(t *testing.T) {
 	ctx := context.Background()
-	a, err := awsdynamodb.Open(ctx, ":memory:")
+	a, err := ddbsqlite.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestAdapterQueryBasic(t *testing.T) {
 
 func TestAdapterQueryLimitZero(t *testing.T) {
 	ctx := context.Background()
-	a, err := awsdynamodb.Open(ctx, ":memory:")
+	a, err := ddbsqlite.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestAdapterQueryLimitZero(t *testing.T) {
 
 func TestAdapterQueryEmptyKeyCondition(t *testing.T) {
 	ctx := context.Background()
-	a, err := awsdynamodb.Open(ctx, ":memory:")
+	a, err := ddbsqlite.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestAdapterQueryEmptyKeyCondition(t *testing.T) {
 // reference honors them; rejection is the adapter's deliberate divergence.
 func TestAdapterQueryLegacyRejections(t *testing.T) {
 	ctx := context.Background()
-	a, err := awsdynamodb.Open(ctx, ":memory:")
+	a, err := ddbsqlite.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestAdapterQueryScanIndexForwardDefaultNil(t *testing.T) {
 	// A nil ScanIndexForward must default to ASC (true) without panicking: a
 	// query over sk 0..4 returns sk "0" first.
 	ctx := context.Background()
-	a, err := awsdynamodb.Open(ctx, ":memory:")
+	a, err := ddbsqlite.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestAdapterQueryScanIndexForwardDefaultNil(t *testing.T) {
 
 func TestAdapterScanBasic(t *testing.T) {
 	ctx := context.Background()
-	a, err := awsdynamodb.Open(ctx, ":memory:")
+	a, err := ddbsqlite.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestAdapterScanBasic(t *testing.T) {
 // AttributesToGet) rather than silently ignored.
 func TestAdapterScanLegacyRejections(t *testing.T) {
 	ctx := context.Background()
-	a, err := awsdynamodb.Open(ctx, ":memory:")
+	a, err := ddbsqlite.Open(ctx, ":memory:")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

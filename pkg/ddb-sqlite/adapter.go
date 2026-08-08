@@ -1,8 +1,8 @@
-// Package awsdynamodb adapts the ddb engine to the AWS SDK v2 DynamoDBAPI
+// Package ddbsqlite adapts the ddb engine to the AWS SDK v2 DynamoDBAPI
 // surface for the supported operation subset. It is a separate Go module so the
 // SDK dependency is isolated from the SDK-free root. The adapter is
 // goroutine-safe because *ddb.Client is; no extra locking.
-package awsdynamodb
+package ddbsqlite
 
 import (
 	"context"
@@ -166,7 +166,7 @@ func exprString(p *string, field string) (string, error) {
 		return "", nil
 	}
 	if *p == "" {
-		return "", &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: " + field + " must not be empty"}
+		return "", &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: " + field + " must not be empty"}
 	}
 	return *p, nil
 }
@@ -190,10 +190,10 @@ func rejectEmptySubMaps(names map[string]string, values map[string]types.Attribu
 		return nil
 	}
 	if names != nil && len(names) == 0 {
-		return &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: ExpressionAttributeNames must not be empty when an expression is present"}
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: ExpressionAttributeNames must not be empty when an expression is present"}
 	}
 	if values != nil && len(values) == 0 {
-		return &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: ExpressionAttributeValues must not be empty when an expression is present"}
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: ExpressionAttributeValues must not be empty when an expression is present"}
 	}
 	return nil
 }
@@ -219,10 +219,10 @@ func exprValues(m map[string]types.AttributeValue) (map[string]attrval.Value, er
 // conditional write that was never evaluated.
 func rejectLegacy(op string, expected map[string]types.ExpectedAttributeValue, condOp types.ConditionalOperator) error {
 	if len(expected) > 0 {
-		return &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: " + op + ": the legacy Expected parameter is not supported; use ConditionExpression"}
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: " + op + ": the legacy Expected parameter is not supported; use ConditionExpression"}
 	}
 	if condOp != "" {
-		return &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: " + op + ": the legacy ConditionalOperator parameter is not supported; use ConditionExpression"}
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: " + op + ": the legacy ConditionalOperator parameter is not supported; use ConditionExpression"}
 	}
 	return nil
 }
@@ -273,7 +273,7 @@ func (a *Adapter) PutItem(ctx context.Context, params *dynamodb.PutItemInput, op
 // rejecting it is the same deliberate divergence class as Query/Scan.
 func rejectLegacyGetItem(params *dynamodb.GetItemInput) error {
 	if len(params.AttributesToGet) > 0 {
-		return &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: GetItem: the legacy AttributesToGet parameter is not supported; use ProjectionExpression"}
+		return &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: GetItem: the legacy AttributesToGet parameter is not supported; use ProjectionExpression"}
 	}
 	return nil
 }
@@ -357,7 +357,7 @@ func (a *Adapter) UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInp
 	// AttributeUpdates is UpdateItem's own pre-expression parameter. Ignoring it
 	// would let a test believe it wrote attributes that were never applied.
 	if len(params.AttributeUpdates) > 0 {
-		return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: UpdateItem: the legacy AttributeUpdates parameter is not supported; use UpdateExpression"}
+		return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: UpdateItem: the legacy AttributeUpdates parameter is not supported; use UpdateExpression"}
 	}
 	cond, err := exprString(params.ConditionExpression, "ConditionExpression")
 	if err != nil {
@@ -533,10 +533,10 @@ func (a *Adapter) BatchGetItem(ctx context.Context, params *dynamodb.BatchGetIte
 	req := make(map[string]ddb.KeysAndAttributes, len(params.RequestItems))
 	for table, ka := range params.RequestItems {
 		if ka.ProjectionExpression != nil && *ka.ProjectionExpression == "" {
-			return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: BatchGetItem: ProjectionExpression must not be empty"}
+			return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: BatchGetItem: ProjectionExpression must not be empty"}
 		}
 		if ka.ProjectionExpression != nil && ka.ExpressionAttributeNames != nil && len(ka.ExpressionAttributeNames) == 0 {
-			return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "awsdynamodb: BatchGetItem: ExpressionAttributeNames must not be empty when an expression is present"}
+			return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: BatchGetItem: ExpressionAttributeNames must not be empty when an expression is present"}
 		}
 		keys := make([]ddb.Item, 0, len(ka.Keys))
 		for _, k := range ka.Keys {

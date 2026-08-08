@@ -1,4 +1,4 @@
-package awsdynamodb_test
+package ddbsqlite_test
 
 import (
 	"reflect"
@@ -7,7 +7,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/quells-bot/ddb-sqlite-core/attrval"
-	"github.com/quells-bot/ddb-sqlite-core/awsdynamodb"
+	"github.com/quells-bot/ddb-sqlite-core/ddbsqlite"
 )
 
 func TestRoundTripAllTags(t *testing.T) {
@@ -23,11 +23,11 @@ func TestRoundTripAllTags(t *testing.T) {
 		"ns": &types.AttributeValueMemberNS{Value: []string{"1", "2"}},
 		"bs": &types.AttributeValueMemberBS{Value: [][]byte{{1}, {2}}},
 	}
-	item, err := awsdynamodb.FromSDKMap(in)
+	item, err := ddbsqlite.FromSDKMap(in)
 	if err != nil {
 		t.Fatalf("FromSDKMap: %v", err)
 	}
-	out := awsdynamodb.ToSDKMap(item)
+	out := ddbsqlite.ToSDKMap(item)
 	if got := out["s"].(*types.AttributeValueMemberS).Value; got != "hi" {
 		t.Errorf("s = %q", got)
 	}
@@ -46,13 +46,13 @@ func TestRoundTripAllTags(t *testing.T) {
 }
 
 func TestFromSDKInvalidNumber(t *testing.T) {
-	if _, err := awsdynamodb.FromSDK(&types.AttributeValueMemberN{Value: "notanumber"}); err == nil {
+	if _, err := ddbsqlite.FromSDK(&types.AttributeValueMemberN{Value: "notanumber"}); err == nil {
 		t.Error("invalid number should error")
 	}
 }
 
 func TestFromSDKInvalidNumberSetMember(t *testing.T) {
-	if _, err := awsdynamodb.FromSDK(&types.AttributeValueMemberNS{Value: []string{"1", "bad"}}); err == nil {
+	if _, err := ddbsqlite.FromSDK(&types.AttributeValueMemberNS{Value: []string{"1", "bad"}}); err == nil {
 		t.Error("invalid NS member should error")
 	}
 }
@@ -62,7 +62,7 @@ func TestToSDKNumberUsesCanonicalString(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewNumberString: %v", err)
 	}
-	got := awsdynamodb.ToSDK(v).(*types.AttributeValueMemberN).Value
+	got := ddbsqlite.ToSDK(v).(*types.AttributeValueMemberN).Value
 	if got != "1.5" {
 		t.Errorf("got %q, want canonical 1.5", got)
 	}
