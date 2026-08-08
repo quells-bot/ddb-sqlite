@@ -20,7 +20,7 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/ory/dockertest/v4"
 
-	"github.com/quells-bot/ddb-sqlite-core/ddbsqlite"
+	"github.com/quells-bot/ddb-sqlite/pkg/ddb-sqlite"
 )
 
 // api is the minimal interface (exact SDK method signatures) both *dynamodb.Client

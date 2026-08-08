@@ -7,7 +7,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
 	"github.com/quells-bot/ddb-sqlite-core/attrval"
-	"github.com/quells-bot/ddb-sqlite-core/ddbsqlite"
+	"github.com/quells-bot/ddb-sqlite/pkg/ddb-sqlite"
 )
 
 func TestRoundTripAllTags(t *testing.T) {
