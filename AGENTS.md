@@ -30,6 +30,14 @@ aws-sdk-go-v2 types  ──►  Adapter (this repo)  ──►  *ddb.Client (ddb
 
 ```
 .
+├── examples/catalog/      # End-to-end example app (REST API over the adapter)
+│   ├── main.go            # Composition root: wires storage→bus→app, serves HTTP
+│   ├── routes.go          # HTTP routing + method dispatch
+│   ├── wires.go           # Dependency injection (in-memory mock or real AWS)
+│   ├── storage/           # DynamoDB repository layer (single-table PK/SK design)
+│   ├── bus/               # Business logic + validation, maps storage errors
+│   └── app/               # HTTP handlers, request/response types, error→status mapping
+├── pkg/ddb/               # Minimal DynamoDBAPI subset interface used by the example
 ├── pkg/ddb-sqlite/        # The entire package (package name: ddbsqlite)
 │   ├── adapter.go         # SDK V2 DynamoDBAPI surface (16 ops + helpers)
 │   ├── adapter_test.go    # Adapter-specific unit tests
@@ -90,6 +98,8 @@ There is no Makefile, Taskfile, linter config, or CI workflow. Use standard `go`
 | `pkg/ddb-sqlite/conformance_test.go` | `TestMain` (L123) manages dockertest lifecycle; `api` interface (L18) mirrors SDK signatures; `runConformance` (L75) fans out to adapter + dynamodb-local targets |
 | `go.mod` | Module path, Go 1.25.5, direct deps: `aws-sdk-go-v2`, `ddb-sqlite-core`, `dockertest/v4` |
 | `README.md` | Authoritative architecture + supported-features + TTL semantics reference |
+| `pkg/ddb/ddb.go` | Minimal `API` interface — DynamoDBAPI subset satisfied by both `*ddbsqlite.Adapter` and `*dynamodb.Client`; used by the example |
+| `examples/catalog/` | End-to-end REST example: `storage/` (repository, single-table PK/SK), `bus/` (validation + error mapping), `app/` (HTTP handlers); see `examples/catalog/README.md` |
 
 ## Runtime/Tooling Preferences
 

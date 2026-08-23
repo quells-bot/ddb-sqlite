@@ -31,6 +31,11 @@ DynamoDB's read semantics — but deletion here is manual, not automatic.
 A clock can be injected in constructor `Options` to give unit tests more
 precise control over when an item is considered "expired".
 
+## Example
+
+See `examples/catalog` for a complete example of an application which uses
+DynamoDB for its database and ddb-sqlite for unit tests throughout.
+
 ## Architecture
 
 This package is just the adapter shim between
