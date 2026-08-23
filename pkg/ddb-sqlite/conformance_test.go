@@ -25,7 +25,7 @@ import (
 
 // api is the minimal interface (exact SDK method signatures) both *dynamodb.Client
 // and *ddbsqlite.Adapter satisfy. The harness is parameterized by it so the
-// same cases run against the adapter (pass 1) and dynamodb-local (pass 2).
+// same cases run against the adapter and dynamodb-local.
 type api interface {
 	CreateTable(ctx context.Context, params *dynamodb.CreateTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.CreateTableOutput, error)
 	DescribeTable(ctx context.Context, params *dynamodb.DescribeTableInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DescribeTableOutput, error)
@@ -100,7 +100,7 @@ func newLocalTarget(t *testing.T) (api, func()) {
 	}
 }
 
-// --- dynamodb-local target (pass 2) ---
+// --- dynamodb-local target ---
 
 // dynamodb-local target state, owned by TestMain. The container is shared
 // across the whole test binary; newLocalTarget hands out the shared client
@@ -299,7 +299,7 @@ func mustCreateComposite(t *testing.T, c api, ctx context.Context, name string) 
 	}
 }
 
-// mustCreateGsiTable builds the M4 GSI conformance table: pk HASH S, sk RANGE S,
+// mustCreateGsiTable builds the GSI conformance table: pk HASH S, sk RANGE S,
 // with three GSIs:
 //   - gsi-all:   gsi_pk HASH S, gsi_sk RANGE S, ALL
 //   - gsi-keys:  gsi_pk HASH S, (no sort),       KEYS_ONLY
@@ -348,7 +348,7 @@ func mustCreateGsiTable(t *testing.T, c api, ctx context.Context, name string) {
 	}
 }
 
-// seedGsiConformance puts the five M4 seed items into the table.
+// seedGsiConformance puts the five seed items into the table.
 func seedGsiConformance(t *testing.T, c api, ctx context.Context, table string) {
 	t.Helper()
 	items := []map[string]types.AttributeValue{
@@ -409,8 +409,6 @@ func asLimitExceeded(t *testing.T, err error, msg string) {
 	}
 }
 
-// --- M1 conformance cases (all written against api) ---
-
 func TestConfCreateTableDescribeTable(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -454,8 +452,7 @@ func TestConfListTables(t *testing.T) {
 	})
 }
 
-// W8 #7: ListTables with Limit == table count returns all tables and does NOT
-// set LastEvaluatedTableName (P-misc probe; closes M3 §9.2 risk 6).
+// ListTables with Limit == table count returns all tables and does NOT set LastEvaluatedTableName.
 func TestConfListTablesLimitEqualsCount(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -476,8 +473,8 @@ func TestConfListTablesLimitEqualsCount(t *testing.T) {
 	})
 }
 
-// W8 #9: a GSI named identically to its table is accepted at CreateTable and
-// is usable (P-misc probe: no collision validation exists or is needed).
+// A GSI named identically to its table is accepted at CreateTable and
+// is usable (no collision validation exists or is needed).
 func TestConfGsiSameNameAsTable(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -609,7 +606,7 @@ func TestConfPutItemSizeLimit(t *testing.T) {
 		ctx := context.Background()
 		mustCreate(t, c, ctx, "Tbl")
 
-		// Exactly 409600 bytes by AWS accounting: accepted (probe-verified).
+		// Exactly 409600 bytes by AWS accounting: accepted.
 		// {pk:"k", big:S(409594)} = 2+1 + 3+409594 = 409600.
 		_, err := c.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("Tbl"), Item: map[string]types.AttributeValue{
 			"pk":  strVal("k"),
@@ -710,8 +707,6 @@ func TestConfUnknownTable(t *testing.T) {
 	})
 }
 
-// --- M2 pass 1 conformance helpers ---
-
 func numVal(s string) types.AttributeValue { return &types.AttributeValueMemberN{Value: s} }
 
 // mustExpr builds a DynamoDB expression from the builder, failing the test on
@@ -745,9 +740,6 @@ func putConf(t *testing.T, c api, ctx context.Context, table string, item map[st
 	}
 }
 
-// --- M2 pass 1 conformance cases ---
-
-// Case 1: conditional put.
 func TestConfConditionalPut(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -804,7 +796,6 @@ func TestConfConditionalPut(t *testing.T) {
 	})
 }
 
-// Case 2: conditional delete.
 func TestConfConditionalDelete(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -859,7 +850,6 @@ func TestConfConditionalDelete(t *testing.T) {
 	})
 }
 
-// Case 3: ReturnValues=ALL_OLD on Put and Delete.
 func TestConfReturnValuesAllOld(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -917,9 +907,8 @@ func TestConfReturnValuesAllOld(t *testing.T) {
 	})
 }
 
-// seedSemItem is the case-4 fixture, exercising all ten attribute types. Cases
-// that satisfy their condition overwrite the item, so it is re-seeded between
-// subtests.
+// seedSemItem exercises all ten attribute types.
+// Cases that satisfy their condition overwrite the item, so it is re-seeded between subtests.
 func seedSemItem() map[string]types.AttributeValue {
 	return map[string]types.AttributeValue{
 		"pk":   strVal("k"),
@@ -936,7 +925,7 @@ func seedSemItem() map[string]types.AttributeValue {
 	}
 }
 
-// Case 4: comparator and function semantics over all ten types, missing vs
+// comparator and function semantics over all ten types, missing vs
 // NULL, and type-mismatch-is-false.
 //
 // A boolean expression result is observed through the SDK by re-putting the
@@ -968,7 +957,7 @@ func TestConfConditionSemantics(t *testing.T) {
 
 			{"missing equality is false", expression.Name("nope").Equal(expression.Value(strVal("hello"))), false},
 			// The reference evaluates <> with a missing operand to TRUE: a missing
-			// attribute is by definition not equal to anything (spec §4.2).
+			// attribute is by definition not equal to anything.
 			{"missing inequality is true", expression.Name("nope").NotEqual(expression.Value(strVal("hello"))), true},
 
 			{"attribute_exists on a present NULL", expression.AttributeExists(expression.Name("null")), true},
@@ -1027,7 +1016,7 @@ func TestConfConditionSemantics(t *testing.T) {
 			// l is [S "x", N 7]. Searching for the N element requires scanning
 			// past a type-mismatched element. dynamodb-local reports no error
 			// (the condition matches), so the scan SKIPS mismatched elements;
-			// evalContains' TagList branch is correct (spec §4.3(2)).
+			// evalContains' TagList branch is correct.
 			expr := mustExpr(t, expression.NewBuilder().
 				WithCondition(expression.Contains(expression.Name("l"), numVal("7"))))
 			_, err := c.PutItem(ctx, &dynamodb.PutItemInput{
@@ -1045,7 +1034,6 @@ func TestConfConditionSemantics(t *testing.T) {
 	})
 }
 
-// Case 5: BETWEEN with reversed bounds is a validation error, not false.
 func TestConfBetweenReversedBounds(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -1099,8 +1087,6 @@ func runCondCases(t *testing.T, c api, ctx context.Context, table string, seed m
 	}
 }
 
-// W8 #1: null-valued vs missing attributes in conditions, filters, and
-// projections. Every expectation measured against dynamodb-local 3.3.1.
 func TestConfNullVsMissing(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -1167,10 +1153,8 @@ func TestConfNullVsMissing(t *testing.T) {
 	})
 }
 
-// W8 #2: type-mismatched comparisons are false (or true for <>) — never an
+// type-mismatched comparisons are false (or true for <>) — never an
 // error — when the *operand* is a valid scalar/set type for its operator.
-// Ordering operators with non-scalar *operands* are Task 5. Every expectation
-// measured against dynamodb-local 3.3.1.
 func TestConfTypeMismatchComparisons(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -1226,9 +1210,9 @@ func TestConfTypeMismatchComparisons(t *testing.T) {
 	})
 }
 
-// W8 #2: ordering comparators and BETWEEN reject a non-scalar :value operand
+// Ordering comparators and BETWEEN reject a non-scalar :value operand
 // (anything but S, N, B) with ValidationException — at request time, even when
-// the compared attribute is missing. Measured against dynamodb-local 3.3.1.
+// the compared attribute is missing.
 func TestConfOrderingOperandTypeValidation(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -1283,8 +1267,6 @@ func TestConfOrderingOperandTypeValidation(t *testing.T) {
 	})
 }
 
-// Case 6: size() over the supported types, plus the N probe that settles
-// spec §4.3(1).
 func TestConfSize(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -1346,11 +1328,9 @@ func TestConfSize(t *testing.T) {
 		})
 		asConditionalCheckFailed(t, err, "size() of a missing attribute")
 
-		// Probe: spec §4.3(1). Real DynamoDB's documentation does not list N
-		// among size()'s supported types; the parent spec §5.1 claims a digit
-		// count. dynamodb-local reports ConditionalCheckFailed for both the
-		// correct digit count and a wrong one, so size(N) is undefined and the
-		// comparison is simply false; parent spec §5.1 was amended accordingly.
+		// Real DynamoDB's documentation does not list N among size()'s supported types.
+		// dynamodb-local reports ConditionalCheckFailed for both the correct digit count
+		// and a wrong one, so size(N) is undefined and the comparison is simply false.
 		t.Run("size of a number", func(t *testing.T) {
 			putConf(t, c, ctx, "Size", map[string]types.AttributeValue{"pk": strVal("k"), "n": numVal("12345")})
 			numSize := mustExpr(t, expression.NewBuilder().
@@ -1367,7 +1347,6 @@ func TestConfSize(t *testing.T) {
 	})
 }
 
-// Case 7: substitution validation — undefined and unused entries.
 func TestConfSubstitutionValidation(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -1436,7 +1415,7 @@ func TestConfSubstitutionValidation(t *testing.T) {
 		t.Run("substitutions split across two expressions", func(t *testing.T) {
 			// #n is referenced only by the ConditionExpression and :v only by the
 			// UpdateExpression. Neither is unused: DynamoDB validates the maps
-			// against the UNION of every expression's refs (spec §4.5).
+			// against the UNION of every expression's refs.
 			if _, err := c.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 				TableName:                 aws.String("Subst"),
 				Key:                       map[string]types.AttributeValue{"pk": strVal("k")},
@@ -1451,8 +1430,6 @@ func TestConfSubstitutionValidation(t *testing.T) {
 	})
 }
 
-// --- M2 pass 2 conformance cases ---
-
 // getConf reads one item by string partition key.
 func getConf(t *testing.T, c api, ctx context.Context, table, pk string) map[string]types.AttributeValue {
 	t.Helper()
@@ -1466,7 +1443,6 @@ func getConf(t *testing.T, c api, ctx context.Context, table, pk string) map[str
 	return out.Item
 }
 
-// Case 8: UpdateItem upsert on an absent key.
 func TestConfUpdateUpsert(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -1521,7 +1497,6 @@ func TestConfUpdateUpsert(t *testing.T) {
 	})
 }
 
-// Case 9: every update action.
 func TestConfUpdateActions(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -1699,7 +1674,6 @@ func TestConfUpdateActions(t *testing.T) {
 	})
 }
 
-// Case 10: actions DynamoDB rejects outright.
 func TestConfUpdateRejections(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -1736,7 +1710,6 @@ func TestConfUpdateRejections(t *testing.T) {
 	})
 }
 
-// Case 11: all five ReturnValues modes on UpdateItem.
 func TestConfUpdateReturnValues(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -1838,7 +1811,6 @@ func TestConfUpdateReturnValues(t *testing.T) {
 	})
 }
 
-// Case 12: ReturnValuesOnConditionCheckFailure populates the exception's Item.
 func TestConfReturnValuesOnConditionCheckFailure(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -1907,9 +1879,7 @@ func TestConfReturnValuesOnConditionCheckFailure(t *testing.T) {
 	})
 }
 
-// --- M2 pass 3: validation ordering ---
-
-// Case 13: a request that is invalid in two ways reports the failure DynamoDB
+// A request that is invalid in two ways reports the failure DynamoDB
 // reports. The service validates the table first, so a missing table beats a
 // malformed expression, an unsupported ReturnValues mode, and an unused
 // substitution — all of which would otherwise be ValidationException.
@@ -1979,7 +1949,7 @@ func TestConfValidationOrderingTableFirst(t *testing.T) {
 	})
 }
 
-// Case 14: a pathologically nested condition is rejected rather than crashing.
+// A pathologically nested condition is rejected rather than crashing.
 // The engine caps grammar recursion (expr.maxParseDepth); the reference
 // rejects the same input for exceeding its operator and expression-size
 // limits. Either way the caller sees a ValidationException, and neither target
@@ -2014,7 +1984,7 @@ func TestConfPathologicalNesting(t *testing.T) {
 	})
 }
 
-// Case 15: document paths that mix bare segments with #name substitutions.
+// Document paths that mix bare segments with #name substitutions.
 // The SDK expression builder aliases every segment, so builder-generated cases
 // never exercise the hand-written shapes callers actually send: a bare parent
 // with an aliased child, an aliased parent with a bare child, and an alias
@@ -2667,7 +2637,7 @@ func TestConfReturnValuesCaseSensitivity(t *testing.T) {
 	})
 }
 
-// --- M3 conformance cases (Query/Scan) ---
+// --- Query/Scan conformance cases ---
 
 // seedComposite seeds n items into partition pkVal with sk 0..n-1 and a
 // itemKey returns a stable string identifying a composite item (pk "|" sk) so
@@ -3056,9 +3026,9 @@ func TestConfScanPagination(t *testing.T) {
 	})
 }
 
-// W8 #4: a Scan whose Limit lands exactly on the result boundary stops with
+// A Scan whose Limit lands exactly on the result boundary stops with
 // reason "Limit reached" — LEK is set — and resuming yields an empty trailing
-// page with LEK nil (the M3 stop-reason contract, Scan side).
+// page with LEK nil (the stop-reason contract, Scan side).
 func TestConfScanTrailingEmptyPage(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -3093,7 +3063,7 @@ func TestConfScanTrailingEmptyPage(t *testing.T) {
 	})
 }
 
-// W8 #5: resuming from a LEK that sits exactly on a partition boundary loses
+// Resuming from a LEK that sits exactly on a partition boundary loses
 // and repeats nothing — pages of 5, 5, then the empty terminator over two
 // partitions of five items each.
 func TestConfScanResumePartitionBoundary(t *testing.T) {
@@ -3143,7 +3113,7 @@ func TestConfScanResumePartitionBoundary(t *testing.T) {
 	})
 }
 
-// TestConfParallelScan (case 27) verifies that a scan split into TotalSegments
+// TestConfParallelScan verifies that a scan split into TotalSegments
 // disjoint segments returns, in union, exactly the full item set, with every
 // item appearing in precisely one segment (no overlap, no omission).
 func TestConfParallelScan(t *testing.T) {
@@ -3246,11 +3216,11 @@ func TestConfBeginsWithOnNumber(t *testing.T) {
 	})
 }
 
-// TestConfQueryBeginsWithOnStringSortKey covers the begins_with-on-S gap in
-// case 17 (TestConfQuerySortKeyConditions only exercised =,<,<=,>,>=,BETWEEN
-// on an N sort key). It creates a composite table with an S sort key and
+// TestConfQueryBeginsWithOnStringSortKey covers the begins_with-on-S gap:
+// TestConfQuerySortKeyConditions only exercised =,<,<=,>,>=,BETWEEN
+// on an N sort key. It creates a composite table with an S sort key and
 // asserts begins_with(sk, :prefix) returns exactly the prefix-matching items.
-// This is the case that would have caught the P0 bug (the S-key upper-bound
+// This is the case that would have caught the bug (the S-key upper-bound
 // successor bound as BLOB instead of TEXT).
 func TestConfQueryBeginsWithOnStringSortKey(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -3363,7 +3333,7 @@ func TestConfExclusiveStartKeyValidation(t *testing.T) {
 		})
 		asValidation(t, err, "partition mismatch should be rejected")
 
-		// Key carrying extra attributes (spec case 30).
+		// Key carrying extra attributes.
 		_, err = c.Query(ctx, &dynamodb.QueryInput{
 			TableName:                 aws.String("ConfT"),
 			KeyConditionExpression:    expr.KeyCondition(),
@@ -3420,17 +3390,15 @@ func TestConfLegacyParams(t *testing.T) {
 			},
 		})
 		if isAdapter {
-			// M3 deliberately does not implement the deprecated pre-expression
-			// parameters; the adapter rejects a non-empty KeyConditions with a
-			// ValidationException so a caller never believes the constraint was
-			// applied. This is an adapter scope decision (see design spec §7.5).
+			// The adapter deliberately does not implement the deprecated
+			// pre-expression parameters; it rejects a non-empty KeyConditions
+			// with a ValidationException so a caller never believes the
+			// constraint was applied.
 			asValidation(t, err, "legacy KeyConditions should be rejected on the adapter")
 			return
 		}
 		// The reference (dynamodb-local 3.3.1) still accepts the deprecated
-		// KeyConditions parameter (returns the items). The reference wins over
-		// the spec's §7.5 "reject legacy params" claim: this divergence is
-		// documented in the design spec §7.5, not fixed in the engine.
+		// pre-expression KeyConditions parameter (returns the items).
 		if err != nil {
 			t.Fatalf("reference accepted legacy KeyConditions: %v", err)
 		}
@@ -3568,7 +3536,7 @@ func TestConfSelectCountWithLimitAndFilter(t *testing.T) {
 	})
 }
 
-// --- M4 GSI conformance cases (cases 38-52, spec §10.3) ---
+// --- GSI conformance cases ---
 
 // itemSet returns the set of "pk" values in items, for comparing GSI results
 // whose tied sort keys have no guaranteed relative order.
@@ -3626,7 +3594,7 @@ func wantAttrNames(t *testing.T, item map[string]types.AttributeValue, want []st
 	}
 }
 
-// Case 38: Basic GSI Query — IndexName + gsi_pk = :v returns the right items in
+// Basic GSI Query — IndexName + gsi_pk = :v returns the right items in
 // GSI sort order. Tied sort keys (A,C share gsi_sk=s1) have unspecified order,
 // so items are compared as a set.
 func TestConfGSIBasicQuery(t *testing.T) {
@@ -3651,7 +3619,7 @@ func TestConfGSIBasicQuery(t *testing.T) {
 	})
 }
 
-// Case 39: Sparse GSI — D has no GSI attributes, so it is absent from both a
+// Sparse GSI — D has no GSI attributes, so it is absent from both a
 // Query on gsi-all and a Scan of gsi-all.
 func TestConfGSISparse(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -3686,7 +3654,7 @@ func TestConfGSISparse(t *testing.T) {
 	})
 }
 
-// Case 40: Non-unique GSI key — A and C share gsi_sk=s1 under gsi_pk=G1 and
+// Non-unique GSI key — A and C share gsi_sk=s1 under gsi_pk=G1 and
 // both must be returned.
 func TestConfGSINonUnique(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -3710,7 +3678,7 @@ func TestConfGSINonUnique(t *testing.T) {
 	})
 }
 
-// Case 41: GSI sort-key conditions — =, <, <=, >, >=, BETWEEN and begins_with
+// GSI sort-key conditions — =, <, <=, >, >=, BETWEEN and begins_with
 // on the S gsi_sk sort key of gsi-all for partition G1.
 func TestConfGSISortKeyConditions(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -3757,7 +3725,7 @@ func TestConfGSISortKeyConditions(t *testing.T) {
 	})
 }
 
-// Case 42: ScanIndexForward=false on a GSI returns items in descending GSI sort
+// ScanIndexForward=false on a GSI returns items in descending GSI sort
 // order — B (gsi_sk=s2) first, then the s1 tie (A,C).
 func TestConfGSIScanIndexForward(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -3785,7 +3753,7 @@ func TestConfGSIScanIndexForward(t *testing.T) {
 	})
 }
 
-// Case 43: GSI pagination — Limit=2 with resume to exhaustion.
+// GSI pagination — Limit=2 with resume to exhaustion.
 func TestConfGSIPagination(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -3822,7 +3790,7 @@ func TestConfGSIPagination(t *testing.T) {
 	})
 }
 
-// Case 44: ConsistentRead=true is rejected on a GSI Query and Scan.
+// ConsistentRead=true is rejected on a GSI Query and Scan.
 func TestConfGSIConsistentRead(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -3850,7 +3818,7 @@ func TestConfGSIConsistentRead(t *testing.T) {
 	})
 }
 
-// Case 45: KEYS_ONLY projection — a query on gsi-keys returns only the table
+// KEYS_ONLY projection — a query on gsi-keys returns only the table
 // primary key plus the index key ({gsi_pk, pk, sk}).
 func TestConfGSIProjectionKeysOnly(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -3877,7 +3845,7 @@ func TestConfGSIProjectionKeysOnly(t *testing.T) {
 	})
 }
 
-// Case 46: INCLUDE projection — gsi-incl returns table keys + GSI keys + the
+// INCLUDE projection — gsi-incl returns table keys + GSI keys + the
 // included non-key attrs, omitting absent ones (C has no proj1/proj2).
 func TestConfGSIProjectionInclude(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -3914,7 +3882,7 @@ func TestConfGSIProjectionInclude(t *testing.T) {
 	})
 }
 
-// Nested INCLUDE (M6c W4, probe P-include): a NonKeyAttributes entry that is
+// Nested INCLUDE: a NonKeyAttributes entry that is
 // a document path ("obj.a") is accepted at CreateTable but never projected —
 // the read-time trim keeps top-level names only, so the item's "obj"
 // attribute is absent from GSI reads. dynamodb-local 3.3.1 behaves
@@ -3969,7 +3937,7 @@ func TestConfGSINestedInclude(t *testing.T) {
 	})
 }
 
-// Case 47: ALL projection — a query on gsi-all returns every attribute.
+// ALL projection — a query on gsi-all returns every attribute.
 func TestConfGSIProjectionAll(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -3999,7 +3967,7 @@ func TestConfGSIProjectionAll(t *testing.T) {
 	})
 }
 
-// Case 48: Select=ALL_PROJECTED_ATTRIBUTES on a GSI returns the projected attrs.
+// Select=ALL_PROJECTED_ATTRIBUTES on a GSI returns the projected attrs.
 func TestConfGSISelectAllProjectedAttributes(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -4027,7 +3995,7 @@ func TestConfGSISelectAllProjectedAttributes(t *testing.T) {
 	})
 }
 
-// Case 49: Select=ALL_ATTRIBUTES on a non-ALL GSI is a ValidationException.
+// Select=ALL_ATTRIBUTES on a non-ALL GSI is a ValidationException.
 func TestConfGSISelectAllAttributes(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -4048,7 +4016,7 @@ func TestConfGSISelectAllAttributes(t *testing.T) {
 	})
 }
 
-// Case 50: a non-GSI key attribute in KeyConditionExpression is a
+// A non-GSI key attribute in KeyConditionExpression is a
 // ValidationException.
 func TestConfGSINonGsiAttr(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4070,7 +4038,7 @@ func TestConfGSINonGsiAttr(t *testing.T) {
 	})
 }
 
-// Case 51: GSI Scan — gsi-all returns every indexed item (D excluded) with a
+// GSI Scan — gsi-all returns every indexed item (D excluded) with a
 // nil LEK.
 func TestConfGSIScan(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4092,7 +4060,7 @@ func TestConfGSIScan(t *testing.T) {
 	})
 }
 
-// Case 52: GSI Scan pagination — Limit=2 with resume to exhaustion.
+// GSI Scan pagination — Limit=2 with resume to exhaustion.
 func TestConfGSIScanPagination(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -4123,7 +4091,7 @@ func TestConfGSIScanPagination(t *testing.T) {
 	})
 }
 
-// Case 53: begins_with on the GSI sort key performs a prefix match.
+// begins_with on the GSI sort key performs a prefix match.
 func TestConfGSIBeginsWith(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -4148,7 +4116,7 @@ func TestConfGSIBeginsWith(t *testing.T) {
 	})
 }
 
-// Case 54: UpdateItem changes a GSI key — the item moves to the new GSI
+// UpdateItem changes a GSI key — the item moves to the new GSI
 // partition (old partition no longer returns it, new one does).
 func TestConfGSIUpdateChangesKey(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4189,7 +4157,7 @@ func TestConfGSIUpdateChangesKey(t *testing.T) {
 	})
 }
 
-// Case 55: UpdateItem removes a GSI key — the item becomes sparse (absent from
+// UpdateItem removes a GSI key — the item becomes sparse (absent from
 // the GSI Query).
 func TestConfGSIUpdateRemovesKey(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4223,7 +4191,7 @@ func TestConfGSIUpdateRemovesKey(t *testing.T) {
 	})
 }
 
-// W8 #3: sparse GSI items are ordinary items — updatable while absent from
+// Sparse GSI items are ordinary items — updatable while absent from
 // the index, moved into the index by setting the GSI key attributes, and back
 // out by removing the composite sort key.
 func TestConfGSISparseUpdate(t *testing.T) {
@@ -4298,7 +4266,7 @@ func TestConfGSISparseUpdate(t *testing.T) {
 	})
 }
 
-// Case 56: DeleteItem removes the item from the GSI.
+// DeleteItem removes the item from the GSI.
 func TestConfGSIDeleteRemoves(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -4328,7 +4296,7 @@ func TestConfGSIDeleteRemoves(t *testing.T) {
 	})
 }
 
-// Case 57: a partition-only GSI — gsi_pk = :v returns every item in that
+// A partition-only GSI — gsi_pk = :v returns every item in that
 // partition.
 func TestConfGSIPartitionOnly(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4352,7 +4320,7 @@ func TestConfGSIPartitionOnly(t *testing.T) {
 	})
 }
 
-// Case 58: GSI partition key equal to the table partition key (overlapping key)
+// GSI partition key equal to the table partition key (overlapping key)
 // is valid; the GSI queries correctly. Uses its own table "OvT".
 func TestConfGSIOverlappingKey(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4392,7 +4360,7 @@ func TestConfGSIOverlappingKey(t *testing.T) {
 	})
 }
 
-// Case 59: an ExclusiveStartKey whose GSI partition does not match the
+// an ExclusiveStartKey whose GSI partition does not match the
 // KeyConditionExpression partition is a ValidationException.
 func TestConfGSIEskPartitionMismatch(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4418,7 +4386,7 @@ func TestConfGSIEskPartitionMismatch(t *testing.T) {
 	})
 }
 
-// Case 60: an item with gsi_pk but no gsi_sk (composite GSI) is accepted but
+// An item with gsi_pk but no gsi_sk (composite GSI) is accepted but
 // absent from the GSI Query and Scan.
 func TestConfGSICompositeSortAbsent(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4457,7 +4425,7 @@ func TestConfGSICompositeSortAbsent(t *testing.T) {
 	})
 }
 
-// Case 61: GSI key type mismatch on PutItem — gsi_pk as Number — is a
+// GSI key type mismatch on PutItem — gsi_pk as Number — is a
 // ValidationException and atomic (GetItem finds nothing).
 func TestConfGSIKeyTypeMismatchPut(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4480,7 +4448,7 @@ func TestConfGSIKeyTypeMismatchPut(t *testing.T) {
 	})
 }
 
-// Case 62: a non-scalar GSI key attribute (L/BOOL/SS/NULL) on PutItem is a
+// A non-scalar GSI key attribute (L/BOOL/SS/NULL) on PutItem is a
 // ValidationException.
 func TestConfGSINonScalarKey(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4507,7 +4475,7 @@ func TestConfGSINonScalarKey(t *testing.T) {
 	})
 }
 
-// Case 63: GSI key type mismatch on UpdateItem (SET gsi_pk = :n) is a
+// GSI key type mismatch on UpdateItem (SET gsi_pk = :n) is a
 // ValidationException and atomic (item unchanged).
 func TestConfGSIKeyTypeMismatchUpdate(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4540,7 +4508,7 @@ func TestConfGSIKeyTypeMismatchUpdate(t *testing.T) {
 	})
 }
 
-// Case 64: an empty string as a GSI partition key value is a
+// An empty string as a GSI partition key value is a
 // ValidationException.
 func TestConfGSIEmptyKey(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4554,7 +4522,7 @@ func TestConfGSIEmptyKey(t *testing.T) {
 	})
 }
 
-// Case 65: GSI ExclusiveStartKey shape validation — table-only, GSI-only, and
+// GSI ExclusiveStartKey shape validation — table-only, GSI-only, and
 // union-plus-extra shapes are rejected; the exact union is accepted.
 func TestConfGSIEskShape(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4606,7 +4574,7 @@ func TestConfGSIEskShape(t *testing.T) {
 	})
 }
 
-// Case 66: a duplicate AttributeDefinition is a ValidationException, with and
+// A duplicate AttributeDefinition is a ValidationException, with and
 // without GSIs.
 func TestConfGSIDuplicateAttrDef(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4648,7 +4616,7 @@ func TestConfGSIDuplicateAttrDef(t *testing.T) {
 	})
 }
 
-// Case 67: GSI IndexName validation — illegal characters and names too short
+// GSI IndexName validation — illegal characters and names too short
 // are ValidationExceptions.
 func TestConfGSIIndexNameValidation(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -4685,7 +4653,7 @@ func TestConfGSIIndexNameValidation(t *testing.T) {
 	})
 }
 
-// Case 68: DescribeTable returns the GSI defs — key schemas round-trip.
+// DescribeTable returns the GSI defs — key schemas round-trip.
 func TestConfGSIDescribeTable(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -4960,7 +4928,7 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-// --- M5a TTL conformance cases ---
+// --- TTL conformance cases ---
 
 func TestConfUpdateTimeToLive(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -5018,7 +4986,7 @@ func TestConfUpdateTimeToLiveErrors(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
 
-		// Nonexistent table -> ResourceNotFoundException (precedence over spec validation).
+		// Nonexistent table -> ResourceNotFoundException (precedence over validation).
 		_, err := c.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
 			TableName:               aws.String("nope"),
 			TimeToLiveSpecification: &types.TimeToLiveSpecification{Enabled: aws.Bool(true), AttributeName: aws.String("")},
@@ -5141,7 +5109,7 @@ func TestConfTTLExpiredItemVisible(t *testing.T) {
 }
 
 // =====================================================================
-// M5b — BatchWriteItem conformance (dual-target)
+// BatchWriteItem conformance (dual-target)
 // =====================================================================
 
 func TestConfBatchWriteMultiTable(t *testing.T) {
@@ -5486,9 +5454,7 @@ func TestConfBatchWriteItemTooLarge(t *testing.T) {
 	})
 }
 
-// Confirmed permanent dual-target cases (spec §6.1; Task 1 probes returned
-// ValidationException for all three against dynamodb-local 3.3.1).
-
+// All three return ValidationException against dynamodb-local 3.3.1.
 func TestConfBatchWriteNeitherPutNorDelete(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -5535,7 +5501,7 @@ func TestConfBatchWriteEmptyTableName(t *testing.T) {
 }
 
 // =====================================================================
-// M5b — BatchGetItem conformance (dual-target)
+// BatchGetItem conformance (dual-target)
 // =====================================================================
 
 func TestConfBatchGetMultiTable(t *testing.T) {
@@ -5746,8 +5712,7 @@ func TestConfBatchGetAllMissTableOmitted(t *testing.T) {
 	})
 }
 
-// Confirmed permanent dual-target (spec §2.4; Task 1 probe returned
-// ValidationException for empty Keys against dynamodb-local 3.3.1).
+// Empty Keys returns ValidationException against dynamodb-local 3.3.1.
 func TestConfBatchGetEmptyTableKeys(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -5770,7 +5735,7 @@ func TestConfBatchGetEmptyTableName(t *testing.T) {
 	})
 }
 
-// §6.4: TTL Faithful read model — expired items are visible to BatchGetItem.
+// TTL: expired items are visible to BatchGetItem.
 func TestConfBatchGetExpiredItemVisible(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -5792,13 +5757,13 @@ func TestConfBatchGetExpiredItemVisible(t *testing.T) {
 			t.Fatalf("BatchGetItem: %v", err)
 		}
 		if len(out.Responses["BatchT"]) != 1 {
-			t.Errorf("len(Responses[T]) = %d, want 1 (expired item visible, M5a Faithful model)", len(out.Responses["BatchT"]))
+			t.Errorf("len(Responses[T]) = %d, want 1 (expired item visible)", len(out.Responses["BatchT"]))
 		}
 	})
 }
 
 // =====================================================================
-// M6B — BatchGetItem projection conformance (spec §6.4)
+// BatchGetItem projection conformance (dual-target)
 // =====================================================================
 
 func TestConfBatchGetProjection(t *testing.T) {
@@ -5866,10 +5831,10 @@ func TestConfBatchGetExpressionNamesWithoutProjection(t *testing.T) {
 	})
 }
 
-// --- M6c W6: BatchGetItem 16MiB response cap ---
+// --- BatchGetItem 16MiB response cap ---
 
 // seedCapItems writes n {"pk","big"} items (k00..k{n-1}) to table in
-// BatchWriteItem chunks of 25. Each item's W1 accounting size is exactly
+// BatchWriteItem chunks of 25. Each item's accounting size is exactly
 // 8+payloadLen bytes (len("pk")+3 for the key, len("big")+payloadLen).
 func seedCapItems(t *testing.T, c api, ctx context.Context, table string, n, payloadLen int) {
 	t.Helper()
@@ -5929,7 +5894,7 @@ func TestConfBatchGetResponseCap(t *testing.T) {
 	})
 }
 
-// Measurement is PRE-projection (P-batch): projecting to the tiny key
+// Measurement is pre-projection: projecting to the tiny key
 // attribute changes the response bodies but not which keys spill.
 func TestConfBatchGetResponseCapPreProjection(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -5961,7 +5926,7 @@ func TestConfBatchGetResponseCapPreProjection(t *testing.T) {
 
 // The budget is whole-response: one accumulator across tables. The per-table
 // split is arbitrary on the reference — assert only the totals, the per-table
-// returned+unprocessed invariant, and the spill echo shape (P-batch).
+// returned+unprocessed invariant, and the spill echo shape.
 func TestConfBatchGetResponseCapCrossTableEcho(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -6005,7 +5970,7 @@ func TestConfBatchGetResponseCapCrossTableEcho(t *testing.T) {
 			}
 		}
 		// Spilled entries echo the request's ConsistentRead, projection, and
-		// ExpressionAttributeNames (P-batch).
+		// ExpressionAttributeNames.
 		for table, sp := range out.UnprocessedKeys {
 			if !aws.ToBool(sp.ConsistentRead) {
 				t.Errorf("%s: spilled ConsistentRead = %v, want true", table, sp.ConsistentRead)
@@ -6021,7 +5986,7 @@ func TestConfBatchGetResponseCapCrossTableEcho(t *testing.T) {
 }
 
 // =====================================================================
-// M6a — UpdateTable conformance (dual-target)
+// UpdateTable conformance (dual-target)
 // =====================================================================
 
 // waitForGsiActive polls DescribeTable until the named GSI's IndexStatus is
@@ -6230,11 +6195,11 @@ func TestConfUpdateTableUnknownTable(t *testing.T) {
 	})
 }
 
-// W8 #8: UpdateTable Create naming an existing index AND carrying an invalid
-// key schema surfaces the existing-index error, not the schema error (P-misc
-// probe: the existing-index check beats schema validation). Both targets
-// return an existing-index error; asserted by message since dynamodb-local
-// returns ValidationException where the adapter returns ResourceInUseException.
+// UpdateTable Create naming an existing index AND carrying an invalid key
+// schema surfaces the existing-index error, not the schema error. Both
+// targets return an existing-index error; asserted by message since
+// dynamodb-local returns ValidationException where the adapter returns
+// ResourceInUseException.
 func TestConfUpdateTableCreateExistingPrecedence(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -6279,11 +6244,9 @@ func TestConfUpdateTableCreateExistingPrecedence(t *testing.T) {
 	})
 }
 
-// The following cases assert restrictive behaviors (spec §8 tie-break): the
-// engine follows documented AWS where dynamodb-local may be more permissive, so
-// they run against the adapter only. Task 12 probes dynamodb-local and may
-// upgrade a case to runConformance if the reference target agrees.
-
+// The following cases assert restrictive behaviors: the engine follows
+// documented AWS where dynamodb-local may be more permissive, so they
+// run against the adapter only.
 func TestAdapterUpdateTableAddExisting(t *testing.T) {
 	ctx := context.Background()
 	c, cleanup := newAdapterTarget(t)
@@ -6303,7 +6266,7 @@ func TestAdapterUpdateTableAddExisting(t *testing.T) {
 			},
 		}},
 	})
-	// Create g1x again -> ResourceInUseException (probe P2 default).
+	// Create g1x again -> ResourceInUseException.
 	_, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
 		TableName: aws.String("UpdT"),
 		AttributeDefinitions: []types.AttributeDefinition{
@@ -6339,7 +6302,7 @@ func TestAdapterUpdateTable21stGsi(t *testing.T) {
 	c, cleanup := newAdapterTarget(t)
 	defer cleanup()
 	mustCreate(t, c, ctx, "UpdT")
-	// Create 20 GSIs (probe P3 default: cap enforced; adapter-only until probed).
+	// Create 20 GSIs (cap enforced; adapter-only).
 	for i := 0; i < 20; i++ {
 		name := fmt.Sprintf("g%02d", i)
 		if _, err := c.UpdateTable(ctx, &dynamodb.UpdateTableInput{
@@ -6469,7 +6432,7 @@ func TestAdapterUpdateTableStrayAttributeDefinitions(t *testing.T) {
 	asValidation(t, err, "stray AttributeDefinitions with no GSI action")
 }
 
-// --- M6B: projection helpers ---
+// --- projection helpers ---
 
 // projConfSeed puts one rich item (pk P1, scalars + nested map + list) for
 // projection conformance cases.
@@ -6527,7 +6490,7 @@ func projGetConf(t *testing.T, c api, ctx context.Context, table, projExpr strin
 	return out.Item
 }
 
-// --- M6B: GetItem projection semantics (spec §6.1) ---
+// --- GetItem projection semantics ---
 
 func TestConfProjGetSingle(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -6663,7 +6626,7 @@ func TestConfProjGetPlusAttributesToGet(t *testing.T) {
 	})
 }
 
-// --- M6B: overlap rejection (spec §6.2) ---
+// --- projection overlap rejection ---
 
 func TestConfProjOverlapDuplicate(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -6693,7 +6656,7 @@ func TestConfProjOverlapParentChild(t *testing.T) {
 	})
 }
 
-// --- M6B: Query/Scan projection (spec §6.3) ---
+// --- Query/Scan projection ---
 
 func TestConfProjQuery(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -6829,7 +6792,7 @@ func TestConfProjQuerySelectSpecificAttributes(t *testing.T) {
 	})
 }
 
-// --- M6B: GSI projection restriction (spec §6.5) ---
+// --- GSI projection restriction ---
 
 func TestConfProjGsiKeysOnlyRestricted(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -6953,7 +6916,7 @@ func TestConfProjGsiScanRestricted(t *testing.T) {
 	})
 }
 
-// --- M6B: projection edge cases (spec §6.6) ---
+// --- projection edge cases ---
 
 func TestConfProjDescendIntoScalar(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
@@ -6983,7 +6946,7 @@ func TestConfProjListMultiIndex(t *testing.T) {
 			return got
 		}
 		// Both path orders yield the two elements, compacted; order per the
-		// §2.5 probe (source-index order: arr[2], arr[0] -> [e0, e2]).
+		// source-index order: arr[2], arr[0] -> [e0, e2]).
 		if got := get("arr[0], arr[2]"); len(got) != 2 || got[0] != "e0" || got[1] != "e2" {
 			t.Errorf("arr[0], arr[2] = %v, want [e0 e2]", got)
 		}
@@ -7019,7 +6982,7 @@ func TestConfProjListConvergent(t *testing.T) {
 }
 
 // =====================================================================
-// M6C W2 — expression-limit conformance (dual-target)
+// Expression-limit conformance (dual-target)
 // =====================================================================
 
 // TestConfExprStringLimit pins the 4KB expression-string byte-length limit.
@@ -7139,8 +7102,8 @@ func TestConfSubstitutionValueLimit(t *testing.T) {
 	})
 }
 
-// TestConfEmptyTableNameRejected pins P-names: every table-taking operation
-// rejects an empty TableName with ValidationException.
+// Every table-taking operation rejects an empty TableName with
+// ValidationException.
 func TestConfEmptyTableNameRejected(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -7205,8 +7168,8 @@ func mustCreateCompositeS(t *testing.T, c api, ctx context.Context, name string)
 	}
 }
 
-// TestConfKeyValueLengthLimits pins P-names: pk ≤2048 / sk ≤1024 bytes,
-// inclusive; empty primary-key values rejected.
+// pk <= 2048 / sk <= 1024 bytes, inclusive; empty primary-key values
+// rejected.
 func TestConfKeyValueLengthLimits(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -7233,8 +7196,8 @@ func TestConfKeyValueLengthLimits(t *testing.T) {
 	})
 }
 
-// TestConfIndexAttrNameLengths pins P-names: GSI key attribute names and
-// INCLUDE NonKeyAttributes names are capped at 255 bytes.
+// GSI key attribute names and INCLUDE NonKeyAttributes names are capped at
+// 255 bytes.
 func TestConfIndexAttrNameLengths(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -7271,8 +7234,8 @@ func TestConfIndexAttrNameLengths(t *testing.T) {
 	})
 }
 
-// TestConfCrossIndexProjectionSum pins P-names: user-specified projected
-// attributes across all GSIs sum to ≤100; key attributes do not count.
+// User-specified projected attributes across all GSIs sum to <= 100; key
+// attributes do not count.
 func TestConfCrossIndexProjectionSum(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -7315,12 +7278,12 @@ func TestConfCrossIndexProjectionSum(t *testing.T) {
 }
 
 // =====================================================================
-// M6c W5 — DescribeTable ItemCount/TableSizeBytes reporting (dual-target)
+// DescribeTable ItemCount/TableSizeBytes reporting (dual-target)
 // =====================================================================
 
-// TestConfDescribeTableStats: DescribeTable reports real, immediate
-// ItemCount/TableSizeBytes after puts, overwrites, and deletes (P-desc: exact
-// W1-accounting sums, immediate — no eventual consistency in dynamodb-local).
+// DescribeTable reports real, immediate ItemCount/TableSizeBytes after puts,
+// overwrites, and deletes (exact accounting sums; immediate — no eventual
+// consistency in dynamodb-local).
 func TestConfDescribeTableStats(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()
@@ -7361,9 +7324,8 @@ func TestConfDescribeTableStats(t *testing.T) {
 }
 
 // TestConfDescribeTableGsiStats: per-GSI ItemCount/IndexSizeBytes are
-// projection-independent (P-desc: IndexSizeBytes = full-item W1 sum over
-// indexed items regardless of projection), sparse items are excluded, and
-// values are immediate.
+// projection-independent (IndexSizeBytes = full-item sum over indexed items
+// regardless of projection), sparse items excluded, and values immediate.
 func TestConfDescribeTableGsiStats(t *testing.T) {
 	runConformance(t, func(t *testing.T, c api) {
 		ctx := context.Background()

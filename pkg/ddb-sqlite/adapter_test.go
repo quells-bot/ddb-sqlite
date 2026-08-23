@@ -494,7 +494,7 @@ func TestAdapterBatchWriteGetRoundTrip(t *testing.T) {
 	}
 }
 
-// §6.3 divergent rejections (adapter-only — dynamodb-local supports these).
+// divergent rejections (adapter-only — dynamodb-local supports these).
 // AttributesToGet is the remaining deliberate divergence (ProjectionExpression
 // and ExpressionAttributeNames are now honored by the engine).
 
@@ -664,7 +664,7 @@ func TestAdapterUpdateTableErrorTypes(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed create g1x: %v", err)
 	}
-	// Create existing GSI -> ResourceInUseException (ErrGsiInUse, probe P2 default).
+	// Create existing GSI -> ResourceInUseException (ErrGsiInUse).
 	_, err := a.UpdateTable(ctx, &dynamodb.UpdateTableInput{
 		TableName: aws.String("Tbl"),
 		AttributeDefinitions: []types.AttributeDefinition{
@@ -680,7 +680,7 @@ func TestAdapterUpdateTableErrorTypes(t *testing.T) {
 	})
 	assertTyped[*types.ResourceInUseException](t, err, "ResourceInUseException")
 
-	// Delete unknown GSI -> ResourceNotFoundException (ErrGsiNotFoundForDelete, probe P1 default).
+	// Delete unknown GSI -> ResourceNotFoundException (ErrGsiNotFoundForDelete).
 	_, err = a.UpdateTable(ctx, &dynamodb.UpdateTableInput{
 		TableName: aws.String("Tbl"),
 		GlobalSecondaryIndexUpdates: []types.GlobalSecondaryIndexUpdate{{
@@ -787,8 +787,8 @@ func TestAdapterDescribeTableStats(t *testing.T) {
 	}
 }
 
-// M6c W6: the adapter maps the engine's 16MiB-cap spill into SDK
-// UnprocessedKeys, echoing ConsistentRead/projection/EAN. 100 items of W1
+// The adapter maps the engine's 16MiB-cap spill into SDK
+// UnprocessedKeys, echoing ConsistentRead/projection/EAN. 100 items of
 // size 167,773 each: 99 fit (16,609,527), the 100th trips (16,777,300 >
 // 16,777,216) — key-ascending order spills k99.
 func TestAdapterBatchGetUnprocessedKeys(t *testing.T) {
@@ -948,10 +948,10 @@ func TestAdapterQueryEmptyKeyCondition(t *testing.T) {
 	asValidation(t, err, "empty KeyConditionExpression should be rejected")
 }
 
-// TestAdapterQueryLegacyRejections pins the W7 audit: every deprecated
-// pre-expression Query parameter is rejected (KeyConditions, QueryFilter,
-// ConditionalOperator, AttributesToGet) rather than silently ignored. The
-// reference honors them; rejection is the adapter's deliberate divergence.
+// Every deprecated pre-expression Query parameter is rejected (KeyConditions,
+// QueryFilter, ConditionalOperator, AttributesToGet) rather than silently
+// ignored. The reference honors them; rejection is the adapter's deliberate
+// divergence.
 func TestAdapterQueryLegacyRejections(t *testing.T) {
 	ctx := context.Background()
 	a, err := ddbsqlite.Open(ctx, ":memory:")
@@ -1070,9 +1070,8 @@ func TestAdapterScanBasic(t *testing.T) {
 	}
 }
 
-// TestAdapterScanLegacyRejections pins the W7 audit: every deprecated
-// pre-expression Scan parameter is rejected (ScanFilter, ConditionalOperator,
-// AttributesToGet) rather than silently ignored.
+// Every deprecated pre-expression Scan parameter is rejected (ScanFilter,
+// ConditionalOperator, AttributesToGet) rather than silently ignored.
 func TestAdapterScanLegacyRejections(t *testing.T) {
 	ctx := context.Background()
 	a, err := ddbsqlite.Open(ctx, ":memory:")

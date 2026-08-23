@@ -1,4 +1,4 @@
-// Package ddbsqlite adapts the ddb engine to the AWS SDK v2 DynamoDBAPI
+// Package ddbsqlite adapts the core engine to the AWS SDK v2 DynamoDBAPI
 // surface for the supported operation subset.
 package ddbsqlite
 
@@ -492,7 +492,7 @@ func (a *Adapter) DescribeTimeToLive(ctx context.Context, params *dynamodb.Descr
 // WriteRequest shape (exactly one of PutRequest/DeleteRequest) is validated
 // by the engine, not here — mapError is the single error-mapping point.
 // ReturnConsumedCapacity/ReturnItemCollectionMetrics are accepted and
-// ignored (out of scope for v1, spec §5.4).
+// ignored.
 func (a *Adapter) BatchWriteItem(ctx context.Context, params *dynamodb.BatchWriteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error) {
 	req := make(map[string][]ddb.WriteRequest, len(params.RequestItems))
 	for table, wrs := range params.RequestItems {
@@ -520,7 +520,7 @@ func (a *Adapter) BatchWriteItem(ctx context.Context, params *dynamodb.BatchWrit
 	if _, err := a.client.BatchWriteItem(ctx, ddb.BatchWriteItemInput{RequestItems: req}); err != nil {
 		return nil, mapError(err)
 	}
-	// v1: UnprocessedItems is always empty (no throttling).
+	// UnprocessedItems is always empty (no throttling).
 	return &dynamodb.BatchWriteItemOutput{}, nil
 }
 
@@ -569,8 +569,7 @@ func (a *Adapter) BatchGetItem(ctx context.Context, params *dynamodb.BatchGetIte
 			res.Responses[table] = list
 		}
 	}
-	// 16MiB response-cap spill (M6c W6): echo each spilled table's
-	// KeysAndAttributes with only the unprocessed keys.
+	// 16MiB response-cap spill: echo each spilled table's KeysAndAttributes with only the unprocessed keys.
 	if len(out.UnprocessedKeys) > 0 {
 		res.UnprocessedKeys = make(map[string]types.KeysAndAttributes, len(out.UnprocessedKeys))
 		for table, ka := range out.UnprocessedKeys {
@@ -735,8 +734,7 @@ func (a *Adapter) Query(ctx context.Context, params *dynamodb.QueryInput, optFns
 	if err := rejectEmptySubMaps(params.ExpressionAttributeNames, params.ExpressionAttributeValues, keyCond, filter, proj); err != nil {
 		return nil, err
 	}
-	// Present-but-zero Limit → ValidationException (only the adapter can
-	// distinguish SDK nil from a pointer to 0).
+	// Present-but-zero Limit → ValidationException (only the adapter can distinguish SDK nil from a pointer to 0).
 	if params.Limit != nil && *params.Limit == 0 {
 		return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: "ddbsqlite: Query: Limit must be greater than or equal to 1"}
 	}
