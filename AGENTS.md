@@ -36,12 +36,12 @@ aws-sdk-go-v2 types  ──►  Adapter (this repo)  ──►  *ddb.Client (ddb
 │   ├── wires.go           # Dependency injection (in-memory mock or real AWS)
 │   ├── storage/           # DynamoDB repository layer (single-table PK/SK design)
 │   ├── bus/               # Business logic + validation, maps storage errors
-│   └── app/               # HTTP handlers, request/response types, error→status mapping
-├── pkg/ddb/               # Minimal DynamoDBAPI subset interface used by the example
-├── pkg/ddb-sqlite/        # The entire package (package name: ddbsqlite)
-│   ├── adapter.go         # SDK V2 DynamoDBAPI surface (16 ops + helpers)
-│   ├── adapter_test.go    # Adapter-specific unit tests
-│   ├── marshal.go         # AttributeValue ↔ core attrval.Value conversion
+│   └── marshal_test.go    # Marshalling roundtrip/validation tests
+├── conformance/           # Own module: dual-target parity tests vs dynamodb-local
+│   └── conformance_test.go# TestMain manages dockertest lifecycle (~7.4k lines)
+├── go.mod / go.sum        # Module github.com/quells-bot/ddb-sqlite, Go 1.25.5
+├── README.md              # Architecture overview, supported features, disclosures
+└── LICENSE                # MIT, Copyright (c) 2026 Kai Wells
 │   ├── marshal_test.go    # Marshalling roundtrip/validation tests
 │   └── conformance_test.go# Dual-target parity tests vs dynamodb-local (~7.4k lines)
 ├── go.mod / go.sum        # Module github.com/quells-bot/ddb-sqlite, Go 1.25.5
@@ -53,25 +53,20 @@ No `cmd/`, `scripts/`, `internal/`, or CI config.
 
 ## Development Commands
 
-```sh
-# Run adapter-only tests (default — no Docker required)
+# Run adapter/marshal tests (default — no Docker required)
 go test ./...
 
-# Run full dual-target conformance (requires Docker/Podman)
-DDBSQLITE_CONF_TARGET=all go test -v -count=1 ./...
+# Run dual-target conformance (adapter + dynamodb-local)
+go -C conformance test -count=1 ./...
 
-# Run conformance against dynamodb-local only
-DDBSQLITE_CONF_TARGET=dynamodb-local go test -v -count=1 ./...
-
-# Use an external dynamodb-local endpoint instead of spinning up a container
-DDBSQLITE_CONF_LOCAL_ENDPOINT=http://localhost:8000 go test -v -count=1 ./...
+# Point conformance at a pre-running dynamodb-local instead of a container
+DDBSQLITE_CONF_LOCAL_ENDPOINT=http://localhost:8000 go -C conformance test -count=1 ./...
 
 # Run a specific test
 go test ./pkg/ddb-sqlite/ -run TestAdapterCreateDescribePutGet -v
 
-# Tidy / verify deps
-go mod tidy && go vet ./...
-```
+# Tidy / verify deps (root and conformance modules)
+go mod tidy && go -C conformance mod tidy && go vet ./...
 
 There is no Makefile, Taskfile, linter config, or CI workflow. Use standard `go` tooling. No build tags on any file.
 
@@ -95,8 +90,8 @@ There is no Makefile, Taskfile, linter config, or CI workflow. Use standard `go`
 |------|------|
 | `pkg/ddb-sqlite/adapter.go` | Entry point: `Adapter` struct (L26), `New(client)` (L34), `Open(ctx, dsn)` (L40); 16 SDK methods (CreateTable L122 → Scan L712); `mapError` (L57) |
 | `pkg/ddb-sqlite/marshal.go` | `FromSDK` (L17), `ToSDK` (L61), `FromSDKMap` (L99), `ToSDKMap` (L111); empty-set and number-precision validation |
-| `pkg/ddb-sqlite/conformance_test.go` | `TestMain` (L123) manages dockertest lifecycle; `api` interface (L18) mirrors SDK signatures; `runConformance` (L75) fans out to adapter + dynamodb-local targets |
-| `go.mod` | Module path, Go 1.25.5, direct deps: `aws-sdk-go-v2`, `ddb-sqlite-core`, `dockertest/v4` |
+| `conformance/conformance_test.go` | Own module (`conformance/go.mod`, replace → `../`); `TestMain` (L123) manages dockertest lifecycle; `api` interface (L18) mirrors SDK signatures; `runConformance` always targets both adapter + dynamodb-local |
+| `go.mod` | Module path, Go 1.25.5, direct deps: `aws-sdk-go-v2`, `ddb-sqlite-core` |
 | `README.md` | Authoritative architecture + supported-features + TTL semantics reference |
 | `pkg/ddb/ddb.go` | Minimal `API` interface — DynamoDBAPI subset satisfied by both `*ddbsqlite.Adapter` and `*dynamodb.Client`; used by the example |
 | `examples/catalog/` | End-to-end REST example: `storage/` (repository, single-table PK/SK), `bus/` (validation + error mapping), `app/` (HTTP handlers); see `examples/catalog/README.md` |
@@ -106,19 +101,19 @@ There is no Makefile, Taskfile, linter config, or CI workflow. Use standard `go`
 - **Runtime:** Go 1.25.5 (per `go.mod` directive). No Node/Bun involvement.
 - **Package manager:** `go mod` (committed `go.sum`). No vendoring.
 - **CGO:** Disabled by design — `modernc.org/sqlite` is pure Go. `CGO_ENABLED=0` is the intended build mode.
-- **Docker:** only needed for `DDBSQLITE_CONF_TARGET=all` conformance runs; `dockertest/v4` auto-detects Podman socket as fallback (`ensureDockerHost`, conformance_test.go L178).
+- **Docker:** required for the `dynamodb-local` conformance target; without a socket the target skips per-test with an actionable message. `dockertest/v4` auto-detects Podman socket as fallback (`ensureDockerHost`, conformance/conformance_test.go L178).
 - **Container image:** `amazon/dynamodb-local:3.3.1`, port 8000, 60s readiness retry on `ListTables`.
 
 ## Testing & QA
 
 - **Framework:** Go stdlib `testing` only — no `testify`, no `gomock`. Table-driven where appropriate (`cases := []struct{...}`); otherwise line-driven subtests via `t.Run`.
 - **Naming:** `TestXxx` (unit) / `TestConfXxx` (conformance); subtest names are descriptive strings.
-- **Black-box:** all test files are package `ddbsqlite_test` — they exercise only exported API, never internals.
-- **Three test files:**
+- **Black-box:** test files are external test packages — `ddbsqlite_test` in root, `conformance_test` in the conformance module — exercising only exported API.
+- **Test files:**
   - `adapter_test.go` — adapter-only behavior (error mapping, legacy rejection, UpdateItem/UpdateTable rejections, TTL, batch). ~35 test functions.
   - `marshal_test.go` — 11-type AttributeValue roundtrip + number canonicalization (`'1.50' → '1.5'`).
-  - `conformance_test.go` — ~120 dual-target parity tests covering tables, items, query/scan, GSIs, TTL, batch, projections, and expression limits (path depth, token count, substitution value count, key/value length).
-- **Conformance harness:** same test body runs against both the in-memory adapter and real `dynamodb-local`; divergences surface as test failures. Default runs adapter-only (no Docker); set `DDBSQLITE_CONF_TARGET=all` for full parity.
+  - `conformance/conformance_test.go` — ~120 dual-target parity tests covering tables, items, query/scan, GSIs, TTL, batch, projections, and expression limits (path depth, token count, substitution value count, key/value length).
+- **Conformance harness:** same test body always runs against both the in-memory adapter and real `dynamodb-local`; divergences surface as test failures. Without a container runtime the local target skips per-test with an actionable message. `DDBSQLITE_CONF_LOCAL_ENDPOINT` optionally points at a pre-running instance instead of a container.
 - **TTL semantics:** `TestConfTTLExpiredItemVisible` confirms expired items remain visible on reads (no automatic read-side filtering), matching real DynamoDB. Automatic deletion is **not** implemented — `ExpireExpired` (a core extension) must be called manually.
 - **Coverage:** no coverage thresholds or directives defined.
 
@@ -129,6 +124,6 @@ Conventional-commits style with types: `milestone:`, `fix:`, `docs:`, `chore:`. 
 ## Notes for AI Assistants
 
 - This project was primarily written by LLMs (DeepSeek V4, GLM 5.2, Kimi K3, Claude Opus 5) via the Superpowers brainstorm/plan/execute loop. Code style reflects that: consistent, explicit, minimal.
-- When adding an operation: add the method on `*Adapter` in `adapter.go`, add SDK↔core conversion via existing `FromSDKMap`/`ToSDKMap` helpers, route errors through `mapError`, add `rejectLegacy*` guards if the SDK input has deprecated fields, and add a conformance test (`TestConfXxx`) that exercises both targets.
+- When adding an operation: add the method on `*Adapter` in `adapter.go`, add SDK↔core conversion via existing `FromSDKMap`/`ToSDKMap` helpers, route errors through `mapError`, add `rejectLegacy*` guards if the SDK input has deprecated fields, and add a conformance test (`TestConfXxx`) in the conformance module — the harness always exercises both targets.
 - When modifying marshalling: update `marshal.go` and `marshal_test.go` (`TestRoundTripAllTags` enumerates all 11 attribute types).
-- Prefer extending the conformance suite over adapter-only tests for behavior changes — that is where parity is enforced.
+- Prefer extending the conformance suite (own module, docker reachable or the local target skips) over adapter-only tests for behavior changes — that is where parity is enforced.

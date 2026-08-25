@@ -1,4 +1,4 @@
-package ddbsqlite_test
+package conformance_test
 
 import (
 	"context"
@@ -54,19 +54,8 @@ var confTargets = []confTarget{
 	{"dynamodb-local", newLocalTarget},
 }
 
-func activeTargets() []confTarget {
-	switch os.Getenv("DDBSQLITE_CONF_TARGET") {
-	case "all":
-		return confTargets
-	case "dynamodb-local":
-		return confTargets[1:]
-	default:
-		return confTargets[:1]
-	}
-}
-
 func runConformance(t *testing.T, fn func(*testing.T, api)) {
-	for _, tg := range activeTargets() {
+	for _, tg := range confTargets {
 		tg := tg
 		t.Run(tg.name, func(t *testing.T) {
 			c, cleanup := tg.ctor(t)
@@ -112,19 +101,9 @@ var (
 	localSkipReason string
 )
 
-func localTargetActive() bool {
-	switch os.Getenv("DDBSQLITE_CONF_TARGET") {
-	case "all", "dynamodb-local":
-		return true
-	}
-	return false
-}
-
 func TestMain(m *testing.M) {
-	if localTargetActive() {
-		if err := setupLocalTarget(context.Background()); err != nil {
-			localSkipReason = err.Error()
-		}
+	if err := setupLocalTarget(context.Background()); err != nil {
+		localSkipReason = err.Error()
 	}
 	code := m.Run()
 	teardownLocalTarget()

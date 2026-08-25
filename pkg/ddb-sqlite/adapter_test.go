@@ -39,6 +39,62 @@ func adapterClient(t *testing.T) *ddbsqlite.Adapter {
 	return a
 }
 
+// --- helpers ---
+
+func newAdapterTarget(t *testing.T) (*ddbsqlite.Adapter, func()) {
+	a, err := ddbsqlite.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatalf("adapter Open: %v", err)
+	}
+	return a, func() { _ = a.Close() }
+}
+
+func mustCreate(t *testing.T, a *ddbsqlite.Adapter, ctx context.Context, name string) {
+	t.Helper()
+	_, err := a.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName:            aws.String(name),
+		KeySchema:            []types.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash}},
+		AttributeDefinitions: []types.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS}},
+		BillingMode:          types.BillingModePayPerRequest,
+	})
+	if err != nil {
+		t.Fatalf("CreateTable %q: %v", name, err)
+	}
+}
+
+// putConf seeds one item, failing the test on error.
+func putConf(t *testing.T, a *ddbsqlite.Adapter, ctx context.Context, table string, item map[string]types.AttributeValue) {
+	t.Helper()
+	if _, err := a.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(table), Item: item}); err != nil {
+		t.Fatalf("PutItem: %v", err)
+	}
+}
+
+// mustExpr builds a DynamoDB expression from the builder, failing the test on
+// error. The returned Expression's Condition/Update/Filter getters and
+// Names()/Values() maps are spread into SDK input structs. Using the builder
+// keeps placeholder binding correct without hand-managed #name/:value maps.
+func mustExpr(t *testing.T, b expression.Builder) expression.Expression {
+	t.Helper()
+	expr, err := b.Build()
+	if err != nil {
+		t.Fatalf("build expression: %v", err)
+	}
+	return expr
+}
+
+func asValidation(t *testing.T, err error, msg string) {
+	t.Helper()
+	var ae smithy.APIError
+	if !errors.As(err, &ae) || ae.ErrorCode() != "ValidationException" {
+		t.Errorf("%s: err = %v, want ValidationException", msg, err)
+	}
+}
+
+func strVal(s string) types.AttributeValue { return &types.AttributeValueMemberS{Value: s} }
+
+func numVal(s string) types.AttributeValue { return &types.AttributeValueMemberN{Value: s} }
+
 func TestAdapterCreateDescribePutGet(t *testing.T) {
 	ctx := context.Background()
 	a := adapterClient(t)
