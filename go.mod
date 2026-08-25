@@ -9,7 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/expression v1.8.57
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.62.3
 	github.com/aws/smithy-go v1.27.6
-	github.com/quells-bot/ddb-sqlite-core v0.0.1
+	github.com/quells-bot/ddb-sqlite-core v0.0.2
 )
 
 require (
