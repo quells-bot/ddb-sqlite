@@ -9,26 +9,50 @@ import (
 	"github.com/quells-bot/ddb-sqlite-core/ddb"
 )
 
+// nilErr reports a typed-nil AttributeValue member so FromSDK/FromSDKMap return
+// a ValidationException-mapped error instead of panicking at a nil deref.
+func nilErr(name string) error {
+	return fmt.Errorf("ddbsqlite: %s is nil", name)
+}
+
 // FromSDK converts a single SDK AttributeValue to an attrval.Value. A Number or
 // NumberSet member that fails precision/range validation returns an error (the
 // adapter maps it to ValidationException).
 func FromSDK(av types.AttributeValue) (attrval.Value, error) {
 	switch v := av.(type) {
 	case *types.AttributeValueMemberS:
+		if v == nil {
+			return attrval.Value{}, nilErr("AttributeValueMemberS")
+		}
 		return attrval.NewString(v.Value), nil
 	case *types.AttributeValueMemberN:
+		if v == nil {
+			return attrval.Value{}, nilErr("AttributeValueMemberN")
+		}
 		n, err := attrval.NewNumberString(v.Value)
 		if err != nil {
 			return attrval.Value{}, err
 		}
 		return n, nil
 	case *types.AttributeValueMemberB:
+		if v == nil {
+			return attrval.Value{}, nilErr("AttributeValueMemberB")
+		}
 		return attrval.NewBinary(v.Value), nil
 	case *types.AttributeValueMemberBOOL:
+		if v == nil {
+			return attrval.Value{}, nilErr("AttributeValueMemberBOOL")
+		}
 		return attrval.NewBool(v.Value), nil
 	case *types.AttributeValueMemberNULL:
+		if v == nil {
+			return attrval.Value{}, nilErr("AttributeValueMemberNULL")
+		}
 		return attrval.NewNull(), nil
 	case *types.AttributeValueMemberL:
+		if v == nil {
+			return attrval.Value{}, nilErr("AttributeValueMemberL")
+		}
 		elems := make([]attrval.Value, 0, len(v.Value))
 		for _, e := range v.Value {
 			ev, err := FromSDK(e)
@@ -39,6 +63,9 @@ func FromSDK(av types.AttributeValue) (attrval.Value, error) {
 		}
 		return attrval.NewList(elems), nil
 	case *types.AttributeValueMemberM:
+		if v == nil {
+			return attrval.Value{}, nilErr("AttributeValueMemberM")
+		}
 		m := make(map[string]attrval.Value, len(v.Value))
 		for k, e := range v.Value {
 			ev, err := FromSDK(e)
@@ -49,16 +76,25 @@ func FromSDK(av types.AttributeValue) (attrval.Value, error) {
 		}
 		return attrval.NewMap(m), nil
 	case *types.AttributeValueMemberSS:
+		if v == nil {
+			return attrval.Value{}, nilErr("AttributeValueMemberSS")
+		}
 		if len(v.Value) == 0 {
 			return attrval.Value{}, fmt.Errorf("ddbsqlite: a StringSet must not be empty")
 		}
 		return attrval.NewStringSet(v.Value), nil
 	case *types.AttributeValueMemberNS:
+		if v == nil {
+			return attrval.Value{}, nilErr("AttributeValueMemberNS")
+		}
 		if len(v.Value) == 0 {
 			return attrval.Value{}, fmt.Errorf("ddbsqlite: a NumberSet must not be empty")
 		}
 		return attrval.NewNumberSetFromStrings(v.Value)
 	case *types.AttributeValueMemberBS:
+		if v == nil {
+			return attrval.Value{}, nilErr("AttributeValueMemberBS")
+		}
 		if len(v.Value) == 0 {
 			return attrval.Value{}, fmt.Errorf("ddbsqlite: a BinarySet must not be empty")
 		}

@@ -56,6 +56,47 @@ func TestFromSDKInvalidNumberSetMember(t *testing.T) {
 		t.Error("invalid NS member should error")
 	}
 }
+func TestFromSDKNilMembersError(t *testing.T) {
+	cases := map[string]types.AttributeValue{
+		"s":  (*types.AttributeValueMemberS)(nil),
+		"n":  (*types.AttributeValueMemberN)(nil),
+		"b":  (*types.AttributeValueMemberB)(nil),
+		"bl": (*types.AttributeValueMemberBOOL)(nil),
+		"nl": (*types.AttributeValueMemberNULL)(nil),
+		"l":  (*types.AttributeValueMemberL)(nil),
+		"m":  (*types.AttributeValueMemberM)(nil),
+		"ss": (*types.AttributeValueMemberSS)(nil),
+		"ns": (*types.AttributeValueMemberNS)(nil),
+		"bs": (*types.AttributeValueMemberBS)(nil),
+	}
+	for name, av := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ddbsqlite.FromSDK(av); err == nil {
+				t.Errorf("FromSDK(%s) = nil error, want error for typed-nil member", name)
+			}
+		})
+	}
+}
+
+func TestFromSDKMapTypedNilMember(t *testing.T) {
+	in := map[string]types.AttributeValue{
+		"ok":  &types.AttributeValueMemberS{Value: "fine"},
+		"nil": (*types.AttributeValueMemberN)(nil),
+	}
+	if _, err := ddbsqlite.FromSDKMap(in); err == nil {
+		t.Error("FromSDKMap with a typed-nil member should error, not panic")
+	}
+}
+
+func TestFromSDKListTypedNilElement(t *testing.T) {
+	in := &types.AttributeValueMemberL{Value: []types.AttributeValue{
+		&types.AttributeValueMemberS{Value: "x"},
+		(*types.AttributeValueMemberBOOL)(nil),
+	}}
+	if _, err := ddbsqlite.FromSDK(in); err == nil {
+		t.Error("FromSDK with a typed-nil list element should error, not panic")
+	}
+}
 
 func TestToSDKNumberUsesCanonicalString(t *testing.T) {
 	v, err := attrval.NewNumberString("1.50")
