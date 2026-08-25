@@ -29,6 +29,7 @@ type Repository interface {
 	ListBooks(ctx context.Context, authorID string) ([]*Book, error)
 	ListAllBooks(ctx context.Context) ([]*Book, error)
 	SoftDeleteBooks(ctx context.Context, books []*Book) error
+	ExpireExpired(ctx context.Context) (int, error)
 }
 
 var _ Repository = (*repo)(nil)
@@ -117,4 +118,14 @@ func (r *repo) EnsureTable(ctx context.Context) (err error) {
 		},
 	})
 	return err
+}
+
+// ExpireExpired manually deletes TTL-expired items from the catalog table.
+// Real DynamoDB removes expired items asynchronously; this adapter never
+// auto-deletes, so callers must invoke this explicitly. It reaches the
+// engine extension through the ddb.ExpireExpired helper, which asserts the
+// Expirer capability on the underlying ddb.API — no concrete-adapter import
+// or type cast needed here. Returns the count of deleted items.
+func (r *repo) ExpireExpired(ctx context.Context) (int, error) {
+	return ddb.ExpireExpired(ctx, r.ddb, "catalog")
 }

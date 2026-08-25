@@ -2,6 +2,7 @@ package ddb
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 )
@@ -22,4 +23,25 @@ type API interface {
 	BatchGetItem(ctx context.Context, params *dynamodb.BatchGetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error)
 	UpdateTimeToLive(ctx context.Context, params *dynamodb.UpdateTimeToLiveInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateTimeToLiveOutput, error)
 	DescribeTimeToLive(ctx context.Context, params *dynamodb.DescribeTimeToLiveInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DescribeTimeToLiveOutput, error)
+}
+
+// Expirer is implemented by adapters that support manual TTL expiry. The
+// core *ddbsqlite.Adapter satisfies it; real-DynamoDB clients do not, since
+// DynamoDB removes expired items asynchronously with no client-facing RPC.
+type Expirer interface {
+	ExpireExpired(ctx context.Context, tableName string) (int, error)
+}
+
+// ExpireExpired runs manual TTL expiry against api when it supports the
+// extension. Callers that only hold a ddb.API (such as a repository bound to
+// either the in-memory adapter or a real AWS client) can reach the engine
+// extension without importing the concrete adapter package or performing a
+// type assertion themselves. Returns an error for backends without the
+// extension (e.g. real DynamoDB).
+func ExpireExpired(ctx context.Context, api API, tableName string) (int, error) {
+	e, ok := api.(Expirer)
+	if !ok {
+		return 0, fmt.Errorf("ddb: API %T does not support ExpireExpired", api)
+	}
+	return e.ExpireExpired(ctx, tableName)
 }

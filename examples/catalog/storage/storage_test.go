@@ -4,8 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
+	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/quells-bot/ddb-sqlite/examples/catalog/storage"
 	ddbsqlite "github.com/quells-bot/ddb-sqlite/pkg/ddb-sqlite"
 )
@@ -396,5 +401,73 @@ func TestBatchDeleteBooksChunks(t *testing.T) {
 		if _, err := r.GetBook(ctx, b.AuthorID, b.ID); !errors.Is(err, storage.ErrNotFound) {
 			t.Fatalf("GetBook(%s) after chunked batch err = %v, want ErrNotFound", b.ID, err)
 		}
+	}
+}
+
+func TestExpireExpired(t *testing.T) {
+	ctx := context.Background()
+	a, err := ddbsqlite.Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	r := storage.NewRepo(a)
+	if err := r.EnsureTable(ctx); err != nil {
+		t.Fatalf("EnsureTable: %v", err)
+	}
+
+	// A live book that must survive expiry.
+	live := &storage.Book{ID: "alive", AuthorID: "keep", Title: "Survives", Year: 2001}
+	if err := r.PutBook(ctx, live); err != nil {
+		t.Fatalf("PutBook live: %v", err)
+	}
+
+	// An expired book seeded directly with a past Expires epoch. The repo's
+	// GetBook filters any item with Expires set (read-side soft-delete
+	// filtering), so visibility is verified via the adapter's GetItem —
+	// the engine does not filter expired items on read.
+	expiredAt := time.Now().Unix() - 3600
+	item := map[string]types.AttributeValue{
+		"PK":         &types.AttributeValueMemberS{Value: "AUTHOR#keep"},
+		"SK":         &types.AttributeValueMemberS{Value: "BOOK#gone"},
+		"EntityType": &types.AttributeValueMemberS{Value: "BOOK"},
+		"EntityID":   &types.AttributeValueMemberS{Value: "gone"},
+		"Title":      &types.AttributeValueMemberS{Value: "Expired"},
+		"Year":       &types.AttributeValueMemberN{Value: "2000"},
+		"Expires":    &types.AttributeValueMemberN{Value: strconv.FormatInt(expiredAt, 10)},
+	}
+	if _, err := a.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String("catalog"), Item: item}); err != nil {
+		t.Fatalf("PutItem expired: %v", err)
+	}
+
+	// Expired item is visible before expiry (matches DynamoDB read semantics):
+	// the engine does not filter on read, so a direct GetItem finds it.
+	goneKey := map[string]types.AttributeValue{
+		"PK": &types.AttributeValueMemberS{Value: "AUTHOR#keep"},
+		"SK": &types.AttributeValueMemberS{Value: "BOOK#gone"},
+	}
+	if out, err := a.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("catalog"), Key: goneKey}); err != nil {
+		t.Fatalf("GetItem expired before Expiry err = %v, want nil", err)
+	} else if len(out.Item) == 0 {
+		t.Fatal("GetItem expired before Expiry: item missing, want present")
+	}
+
+	n, err := r.ExpireExpired(ctx)
+	if err != nil {
+		t.Fatalf("ExpireExpired err = %v, want nil", err)
+	}
+	if n != 1 {
+		t.Fatalf("ExpireExpired count = %d, want 1", n)
+	}
+
+	// Expired item is gone (verified via the adapter: the engine deleted it);
+	// live item survives (verified via the repo, which finds it).
+	if out, err := a.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("catalog"), Key: goneKey}); err != nil {
+		t.Fatalf("GetItem gone after Expiry err = %v, want nil", err)
+	} else if len(out.Item) != 0 {
+		t.Fatal("GetItem gone after Expiry: item present, want deleted")
+	}
+	if _, err := r.GetBook(ctx, "keep", "alive"); err != nil {
+		t.Fatalf("GetBook alive after Expiry err = %v, want nil", err)
 	}
 }

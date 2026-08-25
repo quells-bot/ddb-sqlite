@@ -44,6 +44,14 @@ removes expired items; the in-memory adapter does not auto-expire —
 soft-deleted items are filtered out by reads and remain in the table).
 All reads filter soft-deleted items with `attribute_not_exists(Expires)`.
 
+Manual TTL expiry is exposed at the storage layer via
+`repo.ExpireExpired(ctx)`, which calls the `ddb.ExpireExpired` helper on the
+`ddb.API` the repo holds. The helper asserts the `Expirer` capability on the
+underlying client — satisfied by `*ddbsqlite.Adapter`, not by real AWS — so the
+repo reaches the engine extension without importing the concrete adapter or
+performing a cast. Returns the count of deleted items. Real DynamoDB removes
+expired items asynchronously, so there is no counterpart to call in production.
+
 `DeleteAuthor` cascades: it soft-deletes the author, then batch
 soft-deletes all live books under that author via `BatchWriteItem`
 (chunked by 25, the DynamoDB batch limit).

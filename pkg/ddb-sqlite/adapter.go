@@ -488,6 +488,15 @@ func (a *Adapter) DescribeTimeToLive(ctx context.Context, params *dynamodb.Descr
 	return &dynamodb.DescribeTimeToLiveOutput{TimeToLiveDescription: desc}, nil
 }
 
+// ExpireExpired deletes TTL-expired items from tableName. Engine extension
+// with no SDK equivalent: real DynamoDB removes expired items
+// asynchronously, whereas this adapter never auto-deletes — callers must
+// invoke this explicitly. Returns the count of deleted items.
+func (a *Adapter) ExpireExpired(ctx context.Context, tableName string) (int, error) {
+	n, err := a.client.ExpireExpired(ctx, tableName)
+	return n, mapError(err)
+}
+
 // BatchWriteItem translates per-table SDK write requests to the engine. The
 // WriteRequest shape (exactly one of PutRequest/DeleteRequest) is validated
 // by the engine, not here — mapError is the single error-mapping point.
