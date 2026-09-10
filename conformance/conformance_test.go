@@ -20,7 +20,7 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/ory/dockertest/v4"
 
-	"github.com/quells-bot/ddb-sqlite/pkg/ddb-sqlite"
+	ddbsqlite "github.com/quells-bot/ddb-sqlite/pkg/ddb-sqlite"
 )
 
 // api is the minimal interface (exact SDK method signatures) both *dynamodb.Client
@@ -2925,6 +2925,34 @@ func TestConfQueryFilterKeyAttr(t *testing.T) {
 			ExpressionAttributeValues: expr.Values(),
 		})
 		asValidation(t, err, "filter on key attribute should be rejected")
+	})
+}
+
+// TestConfScanFilterKeyAttr verifies that a Scan with a FilterExpression on a
+// key attribute succeeds. Unlike Query, a Scan has no KeyConditionExpression,
+// so a filter on a key attribute is the only way to express one — real
+// DynamoDB permits it.
+func TestConfScanFilterKeyAttr(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateComposite(t, c, ctx, "ConfT")
+		seedComposite(t, c, ctx, "ConfT", "p1", 5)
+
+		// Filter on the sort key attribute "sk" — a key attribute.
+		filterExpr := expression.Name("sk").Equal(expression.Value(2))
+		expr := mustExpr(t, expression.NewBuilder().WithFilter(filterExpr))
+		out, err := c.Scan(ctx, &dynamodb.ScanInput{
+			TableName:                 aws.String("ConfT"),
+			FilterExpression:          expr.Filter(),
+			ExpressionAttributeNames:  expr.Names(),
+			ExpressionAttributeValues: expr.Values(),
+		})
+		if err != nil {
+			t.Fatalf("Scan with filter on key attr: %v", err)
+		}
+		if out.Count != 1 {
+			t.Errorf("Count = %d, want 1 (only sk=2 matches)", out.Count)
+		}
 	})
 }
 
