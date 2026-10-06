@@ -2449,6 +2449,97 @@ func TestConfUpdatedNewAfterDelete(t *testing.T) {
 	})
 }
 
+// Set ADD/DELETE are idempotent: adding members already present, deleting
+// members that are absent, and deleting from a set attribute that no longer
+// exists all succeed and leave the item unchanged. Retried updates rely on it.
+func TestConfSetAddDeleteIdempotent(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "SetIdem")
+		seed := func(t *testing.T) {
+			t.Helper()
+			putConf(t, c, ctx, "SetIdem", map[string]types.AttributeValue{
+				"pk": strVal("k"),
+				"ss": &types.AttributeValueMemberSS{Value: []string{"a", "b"}},
+			})
+		}
+		update := func(t *testing.T, expr string, operand []string) {
+			t.Helper()
+			_, err := c.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+				TableName:                 aws.String("SetIdem"),
+				Key:                       map[string]types.AttributeValue{"pk": strVal("k")},
+				UpdateExpression:          aws.String(expr),
+				ExpressionAttributeValues: map[string]types.AttributeValue{":v": &types.AttributeValueMemberSS{Value: operand}},
+			})
+			if err != nil {
+				t.Fatalf("UpdateItem(%q): %v", expr, err)
+			}
+		}
+		wantSet := func(t *testing.T, want ...string) {
+			t.Helper()
+			got := getConf(t, c, ctx, "SetIdem", "k")
+			ss, ok := got["ss"].(*types.AttributeValueMemberSS)
+			if !ok {
+				t.Fatalf("ss = %v, want SS %v", got["ss"], want)
+			}
+			members := append([]string(nil), ss.Value...)
+			sort.Strings(members)
+			if strings.Join(members, ",") != strings.Join(want, ",") {
+				t.Errorf("ss = %v, want %v", members, want)
+			}
+		}
+		wantAbsent := func(t *testing.T, msg string) {
+			t.Helper()
+			got := getConf(t, c, ctx, "SetIdem", "k")
+			if got == nil {
+				t.Fatalf("%s: item is gone, want it kept without ss", msg)
+			}
+			if v, ok := got["ss"]; ok {
+				t.Errorf("%s: ss = %v, want absent", msg, v)
+			}
+		}
+
+		t.Run("ADD of present members changes nothing", func(t *testing.T) {
+			seed(t)
+			update(t, "ADD ss :v", []string{"a", "b"})
+			wantSet(t, "a", "b")
+		})
+
+		t.Run("DELETE of an absent member changes nothing", func(t *testing.T) {
+			seed(t)
+			update(t, "DELETE ss :v", []string{"z"})
+			wantSet(t, "a", "b")
+		})
+
+		t.Run("repeated DELETE of the last member", func(t *testing.T) {
+			putConf(t, c, ctx, "SetIdem", map[string]types.AttributeValue{
+				"pk": strVal("k"),
+				"ss": &types.AttributeValueMemberSS{Value: []string{"a"}},
+			})
+			update(t, "DELETE ss :v", []string{"a"})
+			wantAbsent(t, "after first DELETE")
+			update(t, "DELETE ss :v", []string{"a"})
+			wantAbsent(t, "after second DELETE")
+
+			check := func(cond expression.ConditionBuilder) error {
+				expr := mustExpr(t, expression.NewBuilder().WithCondition(cond))
+				_, err := c.PutItem(ctx, &dynamodb.PutItemInput{
+					TableName:                 aws.String("SetIdem"),
+					Item:                      map[string]types.AttributeValue{"pk": strVal("k")},
+					ConditionExpression:       expr.Condition(),
+					ExpressionAttributeNames:  expr.Names(),
+					ExpressionAttributeValues: expr.Values(),
+				})
+				return err
+			}
+			if err := check(expression.AttributeNotExists(expression.Name("ss"))); err != nil {
+				t.Errorf("attribute_not_exists(ss): %v, want success", err)
+			}
+			asConditionalCheckFailed(t, check(expression.AttributeExists(expression.Name("ss"))), "attribute_exists(ss)")
+		})
+	})
+}
+
 // A present-but-empty substitution map alongside an expression is a
 // ValidationException. With no expression at all the SDK omits the empty map
 // from the payload, so both targets accept the request. Only the adapter can
