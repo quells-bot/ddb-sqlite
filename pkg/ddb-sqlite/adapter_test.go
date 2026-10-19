@@ -1221,3 +1221,84 @@ func TestAdapterCreateTableWithGSI(t *testing.T) {
 		t.Errorf("got %d items, want 1", len(out.Items))
 	}
 }
+
+func TestAdapterTransactGetOrderAndMissing(t *testing.T) {
+	a := adapterClient(t)
+	ctx := context.Background()
+	mustCreate(t, a, ctx, "TgA")
+	mustCreate(t, a, ctx, "TgB")
+	putConf(t, a, ctx, "TgA", map[string]types.AttributeValue{"pk": strVal("a"), "v": strVal("a-v")})
+	putConf(t, a, ctx, "TgB", map[string]types.AttributeValue{"pk": strVal("b"), "v": strVal("b-v")})
+
+	out, err := a.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: []types.TransactGetItem{
+		{Get: &types.Get{TableName: aws.String("TgB"), Key: map[string]types.AttributeValue{"pk": strVal("b")}}},
+		{Get: &types.Get{TableName: aws.String("TgA"), Key: map[string]types.AttributeValue{"pk": strVal("missing")}}},
+		{Get: &types.Get{TableName: aws.String("TgA"), Key: map[string]types.AttributeValue{"pk": strVal("a")}}},
+	}})
+	if err != nil {
+		t.Fatalf("TransactGetItems: %v", err)
+	}
+	if len(out.Responses) != 3 {
+		t.Fatalf("responses = %d, want 3", len(out.Responses))
+	}
+	if got := out.Responses[0].Item["v"].(*types.AttributeValueMemberS).Value; got != "b-v" {
+		t.Errorf("response[0] = %q, want b-v", got)
+	}
+	if out.Responses[1].Item != nil {
+		t.Errorf("missing item = %#v, want nil", out.Responses[1].Item)
+	}
+	if got := out.Responses[2].Item["v"].(*types.AttributeValueMemberS).Value; got != "a-v" {
+		t.Errorf("response[2] = %q, want a-v", got)
+	}
+}
+
+func TestAdapterTransactGetProjection(t *testing.T) {
+	a := adapterClient(t)
+	ctx := context.Background()
+	mustCreate(t, a, ctx, "TgProj")
+	putConf(t, a, ctx, "TgProj", map[string]types.AttributeValue{
+		"pk": strVal("a"), "keep": strVal("x"), "drop": strVal("y"),
+	})
+	out, err := a.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: []types.TransactGetItem{{
+		Get: &types.Get{
+			TableName:                aws.String("TgProj"),
+			Key:                      map[string]types.AttributeValue{"pk": strVal("a")},
+			ProjectionExpression:     aws.String("#k"),
+			ExpressionAttributeNames: map[string]string{"#k": "keep"},
+		},
+	}}})
+	if err != nil {
+		t.Fatalf("TransactGetItems: %v", err)
+	}
+	item := out.Responses[0].Item
+	if _, ok := item["keep"]; !ok {
+		t.Errorf("keep missing from %#v", item)
+	}
+	if _, ok := item["drop"]; ok {
+		t.Errorf("drop present in %#v", item)
+	}
+}
+
+func TestAdapterTransactGetDuplicate(t *testing.T) {
+	a := adapterClient(t)
+	ctx := context.Background()
+	mustCreate(t, a, ctx, "TgDup")
+	key := map[string]types.AttributeValue{"pk": strVal("a")}
+	_, err := a.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: []types.TransactGetItem{
+		{Get: &types.Get{TableName: aws.String("TgDup"), Key: key}},
+		{Get: &types.Get{TableName: aws.String("TgDup"), Key: key}},
+	}})
+	asValidation(t, err, "duplicate item")
+}
+
+func TestAdapterTransactGetMissingTable(t *testing.T) {
+	a := adapterClient(t)
+	ctx := context.Background()
+	_, err := a.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: []types.TransactGetItem{{
+		Get: &types.Get{TableName: aws.String("Nope"), Key: map[string]types.AttributeValue{"pk": strVal("a")}},
+	}}})
+	var rnfe *types.ResourceNotFoundException
+	if !errors.As(err, &rnfe) {
+		t.Fatalf("err = %v, want ResourceNotFoundException", err)
+	}
+}

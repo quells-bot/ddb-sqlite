@@ -861,3 +861,44 @@ func (a *Adapter) Scan(ctx context.Context, params *dynamodb.ScanInput, optFns .
 	}
 	return res, nil
 }
+
+func (a *Adapter) TransactGetItems(ctx context.Context, params *dynamodb.TransactGetItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactGetItemsOutput, error) {
+	items := make([]ddb.TransactGetItem, 0, len(params.TransactItems))
+	for i, it := range params.TransactItems {
+		if it.Get == nil {
+			return nil, &smithy.GenericAPIError{Code: "ValidationException", Message: fmt.Sprintf("ddbsqlite: TransactItems[%d] must set Get", i)}
+		}
+		g := it.Get
+		proj, err := exprString(g.ProjectionExpression, "ProjectionExpression")
+		if err != nil {
+			return nil, err
+		}
+		if err := rejectEmptySubMaps(g.ExpressionAttributeNames, nil, proj); err != nil {
+			return nil, err
+		}
+		key, err := FromSDKMap(g.Key)
+		if err != nil {
+			return nil, mapError(fmt.Errorf("%w: %v", ddb.ErrValidation, err))
+		}
+		items = append(items, ddb.TransactGetItem{
+			TableName:                aws.ToString(g.TableName),
+			Key:                      key,
+			ProjectionExpression:     proj,
+			ExpressionAttributeNames: g.ExpressionAttributeNames,
+		})
+	}
+
+	out, err := a.client.TransactGetItems(ctx, ddb.TransactGetItemsInput{TransactItems: items})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	res := &dynamodb.TransactGetItemsOutput{Responses: make([]types.ItemResponse, 0, len(out.Responses))}
+	for _, r := range out.Responses {
+		if len(r.Item) == 0 {
+			res.Responses = append(res.Responses, types.ItemResponse{})
+			continue
+		}
+		res.Responses = append(res.Responses, types.ItemResponse{Item: ToSDKMap(r.Item)})
+	}
+	return res, nil
+}
