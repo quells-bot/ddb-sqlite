@@ -8097,3 +8097,177 @@ func TestConfTransactWriteMultipleActions(t *testing.T) {
 		asValidation(t, err, "multiple actions in one item")
 	})
 }
+
+func TestConfTransactWriteExpressionValuesPayloadSize(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		big := strings.Repeat("v", 350*1024)
+		updates := func(n int) []types.TransactWriteItem {
+			out := make([]types.TransactWriteItem, 0, n)
+			for i := range n {
+				out = append(out, types.TransactWriteItem{Update: &types.Update{
+					TableName:                 aws.String("TxW"),
+					Key:                       map[string]types.AttributeValue{"pk": strVal(fmt.Sprintf("u%02d", i))},
+					UpdateExpression:          aws.String("SET b = :v"),
+					ExpressionAttributeValues: map[string]types.AttributeValue{":v": strVal(big)},
+				}})
+			}
+			return out
+		}
+		checks := func(n int) []types.TransactWriteItem {
+			out := make([]types.TransactWriteItem, 0, n)
+			for i := range n {
+				out = append(out, types.TransactWriteItem{ConditionCheck: &types.ConditionCheck{
+					TableName:                 aws.String("TxW"),
+					Key:                       map[string]types.AttributeValue{"pk": strVal(fmt.Sprintf("c%02d", i))},
+					ConditionExpression:       aws.String("attribute_not_exists(b) OR b <> :v"),
+					ExpressionAttributeValues: map[string]types.AttributeValue{":v": strVal(big)},
+				}})
+			}
+			return out
+		}
+		if _, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: updates(11)}); err != nil {
+			t.Errorf("11 big updates: %v", err)
+		}
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: updates(12)})
+		asValidation(t, err, "update values payload size")
+		if _, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: checks(11)}); err != nil {
+			t.Errorf("11 big condition checks: %v", err)
+		}
+		_, err = c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: checks(12)})
+		asValidation(t, err, "condition check values payload size")
+	})
+}
+
+func TestConfTransactWriteOversizedUpdate(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		big := strVal(strings.Repeat("x", 300*1024))
+		putConf(t, c, ctx, "TxW", map[string]types.AttributeValue{"pk": strVal("a"), "x": big})
+		grow := func(cond string) types.TransactWriteItem {
+			u := &types.Update{
+				TableName:                 aws.String("TxW"),
+				Key:                       map[string]types.AttributeValue{"pk": strVal("a")},
+				UpdateExpression:          aws.String("SET y = :v"),
+				ExpressionAttributeValues: map[string]types.AttributeValue{":v": big},
+			}
+			if cond != "" {
+				u.ConditionExpression = aws.String(cond)
+			}
+			return types.TransactWriteItem{Update: u}
+		}
+		codes := func(err error) string {
+			tce := mustCanceled(t, err)
+			out := make([]string, len(tce.CancellationReasons))
+			for i, r := range tce.CancellationReasons {
+				out[i] = aws.ToString(r.Code)
+			}
+			return fmt.Sprint(out)
+		}
+
+		// A failing condition is reported before the post-update size.
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			grow("attribute_not_exists(pk)"),
+		}})
+		if got := codes(err); got != "[ConditionalCheckFailed]" {
+			t.Errorf("failing condition: reasons = %s", got)
+		}
+
+		// Oversized against the existing item: an aligned ValidationError
+		// reason; later actions still run.
+		_, err = c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			txPutSDK("TxW", "b"), grow(""), txConditionPut("TxW", "c", "attribute_exists(pk)"),
+		}})
+		if got := codes(err); got != "[None ValidationError ConditionalCheckFailed]" {
+			t.Errorf("aligned: reasons = %s", got)
+		}
+
+		// The oversized action is not staged: a later action on its key is not
+		// a duplicate.
+		_, err = c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			grow(""), txPutSDK("TxW", "a"),
+		}})
+		if got := codes(err); got != "[ValidationError None]" {
+			t.Errorf("not staged: reasons = %s", got)
+		}
+
+		// A key-attribute update beats the size reason (single-element reasons).
+		_, err = c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			txPutSDK("TxW", "b"),
+			{Update: &types.Update{
+				TableName:                 aws.String("TxW"),
+				Key:                       map[string]types.AttributeValue{"pk": strVal("a")},
+				UpdateExpression:          aws.String("SET y = :v, pk = :k"),
+				ExpressionAttributeValues: map[string]types.AttributeValue{":v": big, ":k": strVal("a")},
+			}},
+		}})
+		if got := codes(err); got != "[ValidationError]" {
+			t.Errorf("key update: reasons = %s", got)
+		}
+	})
+}
+
+func TestConfTransactWriteOversizedUpsert(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		half := strVal(strings.Repeat("q", 250*1024))
+		upsert := func(pk, cond string) types.TransactWriteItem {
+			u := &types.Update{
+				TableName:                 aws.String("TxW"),
+				Key:                       map[string]types.AttributeValue{"pk": strVal(pk)},
+				UpdateExpression:          aws.String("SET y = :v, z = :v"),
+				ExpressionAttributeValues: map[string]types.AttributeValue{":v": half},
+			}
+			if cond != "" {
+				u.ConditionExpression = aws.String(cond)
+			}
+			return types.TransactWriteItem{Update: u}
+		}
+		// Oversized from the key alone is request-level: it beats a failing
+		// condition, an earlier cancellation, the staged item, and an earlier
+		// missing table.
+		for name, items := range map[string][]types.TransactWriteItem{
+			"failing condition": {upsert("n", "attribute_exists(pk)")},
+			"earlier cancel":    {txConditionPut("TxW", "c", "attribute_exists(pk)"), upsert("n", "")},
+			"staged item":       {txPutSDK("TxW", "s"), upsert("s", "")},
+			"missing table":     {txPutSDK("Nope", "z"), upsert("n", "")},
+		} {
+			_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: items})
+			asValidation(t, err, "oversized upsert, "+name)
+		}
+	})
+}
+
+func TestConfTransactGetProjectionMatchesNothing(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TgProj")
+		putConf(t, c, ctx, "TgProj", map[string]types.AttributeValue{"pk": strVal("a")})
+		out, err := c.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: []types.TransactGetItem{
+			{Get: &types.Get{
+				TableName:            aws.String("TgProj"),
+				Key:                  map[string]types.AttributeValue{"pk": strVal("a")},
+				ProjectionExpression: aws.String("nope"),
+			}},
+			{Get: &types.Get{
+				TableName:            aws.String("TgProj"),
+				Key:                  map[string]types.AttributeValue{"pk": strVal("missing")},
+				ProjectionExpression: aws.String("nope"),
+			}},
+		}})
+		if err != nil {
+			t.Fatalf("TransactGetItems: %v", err)
+		}
+		// An existing item projected to nothing is an empty, non-nil map; a
+		// missing item stays nil.
+		if got := out.Responses[0].Item; got == nil || len(got) != 0 {
+			t.Errorf("existing item: Item = %#v, want empty non-nil map", got)
+		}
+		if got := out.Responses[1].Item; got != nil {
+			t.Errorf("missing item: Item = %#v, want nil", got)
+		}
+	})
+}

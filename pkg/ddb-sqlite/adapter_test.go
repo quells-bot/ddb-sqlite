@@ -1470,3 +1470,23 @@ func TestAdapterTransactWriteMultipleActions(t *testing.T) {
 	}}})
 	asValidation(t, err, "multiple actions in one item")
 }
+
+func TestAdapterTransactGetProjectionMatchesNothing(t *testing.T) {
+	a := adapterClient(t)
+	ctx := context.Background()
+	mustCreate(t, a, ctx, "TgProj")
+	putConf(t, a, ctx, "TgProj", map[string]types.AttributeValue{"pk": strVal("a")})
+	out, err := a.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: []types.TransactGetItem{{
+		Get: &types.Get{
+			TableName:            aws.String("TgProj"),
+			Key:                  map[string]types.AttributeValue{"pk": strVal("a")},
+			ProjectionExpression: aws.String("nope"),
+		},
+	}}})
+	if err != nil {
+		t.Fatalf("TransactGetItems: %v", err)
+	}
+	if got := out.Responses[0].Item; got == nil || len(got) != 0 {
+		t.Errorf("Item = %#v, want empty non-nil map", got)
+	}
+}

@@ -911,7 +911,9 @@ func (a *Adapter) TransactGetItems(ctx context.Context, params *dynamodb.Transac
 	}
 	res := &dynamodb.TransactGetItemsOutput{Responses: make([]types.ItemResponse, 0, len(out.Responses))}
 	for _, r := range out.Responses {
-		if len(r.Item) == 0 {
+		// nil means no item; an existing item projected to nothing is an empty
+		// map, which local returns as Item: {}.
+		if r.Item == nil {
 			res.Responses = append(res.Responses, types.ItemResponse{})
 			continue
 		}
