@@ -942,6 +942,15 @@ func (a *Adapter) TransactWriteItems(ctx context.Context, params *dynamodb.Trans
 }
 
 func fromSDKTransactWriteItem(it types.TransactWriteItem) (ddb.TransactWriteItem, error) {
+	count := 0
+	for _, set := range []bool{it.Put != nil, it.Update != nil, it.Delete != nil, it.ConditionCheck != nil} {
+		if set {
+			count++
+		}
+	}
+	if count != 1 {
+		return ddb.TransactWriteItem{}, fmt.Errorf("TransactItems can only contain one of Put, Update, Delete, or ConditionCheck")
+	}
 	switch {
 	case it.Put != nil:
 		p := it.Put

@@ -1453,3 +1453,20 @@ func TestAdapterTransactWriteAllActions(t *testing.T) {
 		t.Errorf("d still present: %#v", deleted.Item)
 	}
 }
+
+func TestAdapterTransactWriteMultipleActions(t *testing.T) {
+	a := adapterClient(t)
+	ctx := context.Background()
+	mustCreate(t, a, ctx, "TxW")
+	_, err := a.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+		Put: &types.Put{
+			TableName: aws.String("TxW"),
+			Item:      map[string]types.AttributeValue{"pk": strVal("a")},
+		},
+		Delete: &types.Delete{
+			TableName: aws.String("TxW"),
+			Key:       map[string]types.AttributeValue{"pk": strVal("a")},
+		},
+	}}})
+	asValidation(t, err, "multiple actions in one item")
+}

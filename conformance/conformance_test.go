@@ -8009,3 +8009,91 @@ func TestConfTransactWriteCrossTableSameKey(t *testing.T) {
 		}
 	})
 }
+
+func TestConfTransactGetCrossTableSameKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TgX")
+		mustCreate(t, c, ctx, "TgY")
+		key := map[string]types.AttributeValue{"pk": strVal("same")}
+		if _, err := c.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: []types.TransactGetItem{
+			{Get: &types.Get{TableName: aws.String("TgX"), Key: key}},
+			{Get: &types.Get{TableName: aws.String("TgY"), Key: key}},
+		}}); err != nil {
+			t.Fatalf("cross-table same key: %v", err)
+		}
+	})
+}
+
+func TestConfTransactGetProjectedResponseSize(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TgProjSize")
+		big := strings.Repeat("x", 350*1024)
+		items := make([]types.TransactGetItem, 0, 12)
+		for i := range 12 {
+			pk := fmt.Sprintf("k%02d", i)
+			putConf(t, c, ctx, "TgProjSize", map[string]types.AttributeValue{"pk": strVal(pk), "blob": strVal(big)})
+			items = append(items, types.TransactGetItem{Get: &types.Get{
+				TableName:            aws.String("TgProjSize"),
+				Key:                  map[string]types.AttributeValue{"pk": strVal(pk)},
+				ProjectionExpression: aws.String("pk"),
+			}})
+		}
+		if _, err := c.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: items}); err != nil {
+			t.Fatalf("projected 12 items: %v", err)
+		}
+	})
+}
+
+func TestConfTransactWriteGSINonScalarKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "TxG")
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+			Put: &types.Put{
+				TableName: aws.String("TxG"),
+				Item: map[string]types.AttributeValue{
+					"pk": strVal("A"), "sk": strVal("a"),
+					"gsi_pk": &types.AttributeValueMemberBOOL{Value: true},
+				},
+			},
+		}}})
+		asValidation(t, err, "non-scalar gsi key")
+	})
+}
+
+func TestConfTransactWriteGSIOversizedKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "TxG")
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+			Put: &types.Put{
+				TableName: aws.String("TxG"),
+				Item: map[string]types.AttributeValue{
+					"pk": strVal("A"), "sk": strVal("a"),
+					"gsi_pk": strVal(strings.Repeat("g", 3000)),
+				},
+			},
+		}}})
+		asValidation(t, err, "oversized gsi key")
+	})
+}
+
+func TestConfTransactWriteMultipleActions(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+			Put: &types.Put{
+				TableName: aws.String("TxW"),
+				Item:      map[string]types.AttributeValue{"pk": strVal("a")},
+			},
+			Delete: &types.Delete{
+				TableName: aws.String("TxW"),
+				Key:       map[string]types.AttributeValue{"pk": strVal("a")},
+			},
+		}}})
+		asValidation(t, err, "multiple actions in one item")
+	})
+}
