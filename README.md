@@ -20,6 +20,7 @@ testing against the dynamodb-local container image.
 - Tables: CreateTable, DescribeTable, DeleteTable, ListTables, UpdateTable
 - Items: GetItem, PutItem, DeleteItem, UpdateItem, Query, Scan
 - Batch: BatchGetItem, BatchWriteItem
+- Transactions: TransactWriteItems (Put/Update/Delete/ConditionCheck), TransactGetItems
 - TTL: UpdateTimeToLive, DescribeTimeToLive, ExpireExpired (extension, see below)
 
 DynamoDB auto-delete via TTL is not immediate; the behavior is carried into
