@@ -40,6 +40,7 @@ type api interface {
 	Scan(ctx context.Context, params *dynamodb.ScanInput, optFns ...func(*dynamodb.Options)) (*dynamodb.ScanOutput, error)
 	BatchWriteItem(ctx context.Context, params *dynamodb.BatchWriteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
 	BatchGetItem(ctx context.Context, params *dynamodb.BatchGetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error)
+	TransactGetItems(ctx context.Context, params *dynamodb.TransactGetItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactGetItemsOutput, error)
 	UpdateTimeToLive(ctx context.Context, params *dynamodb.UpdateTimeToLiveInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateTimeToLiveOutput, error)
 	DescribeTimeToLive(ctx context.Context, params *dynamodb.DescribeTimeToLiveInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DescribeTimeToLiveOutput, error)
 }
@@ -7469,5 +7470,130 @@ func TestConfDescribeTableGsiStats(t *testing.T) {
 				t.Errorf("GSI %q size = %d, want 28", aws.ToString(g.IndexName), aws.ToInt64(g.IndexSizeBytes))
 			}
 		}
+	})
+}
+
+func TestConfTransactGetOrderAndMissing(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TgA")
+		mustCreate(t, c, ctx, "TgB")
+		putConf(t, c, ctx, "TgA", map[string]types.AttributeValue{"pk": strVal("a"), "v": strVal("a-v")})
+		putConf(t, c, ctx, "TgB", map[string]types.AttributeValue{"pk": strVal("b"), "v": strVal("b-v")})
+
+		out, err := c.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: []types.TransactGetItem{
+			{Get: &types.Get{TableName: aws.String("TgB"), Key: map[string]types.AttributeValue{"pk": strVal("b")}}},
+			{Get: &types.Get{TableName: aws.String("TgA"), Key: map[string]types.AttributeValue{"pk": strVal("missing")}}},
+			{Get: &types.Get{TableName: aws.String("TgA"), Key: map[string]types.AttributeValue{"pk": strVal("a")}}},
+		}})
+		if err != nil {
+			t.Fatalf("TransactGetItems: %v", err)
+		}
+		if len(out.Responses) != 3 {
+			t.Fatalf("responses = %d, want 3", len(out.Responses))
+		}
+		if got := out.Responses[0].Item["v"].(*types.AttributeValueMemberS).Value; got != "b-v" {
+			t.Errorf("response[0] = %q, want b-v", got)
+		}
+		if out.Responses[1].Item != nil {
+			t.Errorf("missing item = %#v, want nil", out.Responses[1].Item)
+		}
+		if got := out.Responses[2].Item["v"].(*types.AttributeValueMemberS).Value; got != "a-v" {
+			t.Errorf("response[2] = %q, want a-v", got)
+		}
+	})
+}
+
+func TestConfTransactGetProjection(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TgProj")
+		putConf(t, c, ctx, "TgProj", map[string]types.AttributeValue{
+			"pk": strVal("a"), "keep": strVal("x"), "drop": strVal("y"),
+		})
+		out, err := c.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: []types.TransactGetItem{{
+			Get: &types.Get{
+				TableName:                aws.String("TgProj"),
+				Key:                      map[string]types.AttributeValue{"pk": strVal("a")},
+				ProjectionExpression:     aws.String("#k"),
+				ExpressionAttributeNames: map[string]string{"#k": "keep"},
+			},
+		}}})
+		if err != nil {
+			t.Fatalf("TransactGetItems: %v", err)
+		}
+		item := out.Responses[0].Item
+		if _, ok := item["keep"]; !ok {
+			t.Errorf("keep missing from %#v", item)
+		}
+		if _, ok := item["drop"]; ok {
+			t.Errorf("drop present in %#v", item)
+		}
+	})
+}
+
+func TestConfTransactGetDuplicate(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TgDup")
+		key := map[string]types.AttributeValue{"pk": strVal("a")}
+		_, err := c.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: []types.TransactGetItem{
+			{Get: &types.Get{TableName: aws.String("TgDup"), Key: key}},
+			{Get: &types.Get{TableName: aws.String("TgDup"), Key: key}},
+		}})
+		asValidation(t, err, "duplicate item")
+	})
+}
+
+func TestConfTransactGetLimits(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TgLim")
+		makeItems := func(n int) []types.TransactGetItem {
+			items := make([]types.TransactGetItem, 0, n)
+			for i := range n {
+				items = append(items, types.TransactGetItem{Get: &types.Get{
+					TableName: aws.String("TgLim"),
+					Key:       map[string]types.AttributeValue{"pk": strVal(fmt.Sprintf("k%03d", i))},
+				}})
+			}
+			return items
+		}
+		_, err := c.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: makeItems(101)})
+		asValidation(t, err, "101 items")
+		if _, err := c.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: makeItems(100)}); err != nil {
+			t.Errorf("100 items: err = %v, want nil", err)
+		}
+	})
+}
+
+func TestConfTransactGetMissingTable(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		_, err := c.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: []types.TransactGetItem{{
+			Get: &types.Get{TableName: aws.String("Nope"), Key: map[string]types.AttributeValue{"pk": strVal("a")}},
+		}}})
+		asResourceNotFound(t, err, "missing table")
+	})
+}
+
+func TestConfTransactGetResponseTooLarge(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TgSize")
+		big := strings.Repeat("x", 350*1024)
+		items := make([]types.TransactGetItem, 0, 12)
+		for i := range 12 {
+			pk := fmt.Sprintf("k%02d", i)
+			putConf(t, c, ctx, "TgSize", map[string]types.AttributeValue{
+				"pk": strVal(pk), "blob": strVal(big),
+			})
+			items = append(items, types.TransactGetItem{Get: &types.Get{
+				TableName: aws.String("TgSize"),
+				Key:       map[string]types.AttributeValue{"pk": strVal(pk)},
+			}})
+		}
+		_, err := c.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: items})
+		asValidation(t, err, "response too large")
 	})
 }

@@ -61,3 +61,5 @@ require (
 )
 
 replace github.com/quells-bot/ddb-sqlite => ../
+
+replace github.com/quells-bot/ddb-sqlite-core => ../../ddb-sqlite-core
