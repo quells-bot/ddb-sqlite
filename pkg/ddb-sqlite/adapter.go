@@ -50,6 +50,21 @@ func mapError(err error) error {
 	if err == nil {
 		return nil
 	}
+	var tce *ddb.TransactionCanceledError
+	if errors.As(err, &tce) {
+		e := &types.TransactionCanceledException{Message: aws.String(tce.Error())}
+		for _, r := range tce.Reasons {
+			cr := types.CancellationReason{Code: aws.String(r.Code)}
+			if r.Message != "" {
+				cr.Message = aws.String(r.Message)
+			}
+			if len(r.Item) > 0 {
+				cr.Item = ToSDKMap(r.Item)
+			}
+			e.CancellationReasons = append(e.CancellationReasons, cr)
+		}
+		return e
+	}
 	var ccf *ddb.ConditionalCheckFailedError
 	if errors.As(err, &ccf) {
 		e := &types.ConditionalCheckFailedException{Message: aws.String(ccf.Error())}
@@ -73,6 +88,8 @@ func mapError(err error) error {
 		return &types.ResourceNotFoundException{Message: aws.String(err.Error())}
 	case errors.Is(err, ddb.ErrLimitExceeded):
 		return &types.LimitExceededException{Message: aws.String(err.Error())}
+	case errors.Is(err, ddb.ErrIdempotentParameterMismatch):
+		return &types.IdempotentParameterMismatchException{Message: aws.String(err.Error())}
 	case errors.Is(err, ddb.ErrValidation):
 		// DynamoDB has no generated ValidationException type; real DynamoDB
 		// surfaces 400/validation failures as a generic API error carrying the
@@ -901,4 +918,137 @@ func (a *Adapter) TransactGetItems(ctx context.Context, params *dynamodb.Transac
 		res.Responses = append(res.Responses, types.ItemResponse{Item: ToSDKMap(r.Item)})
 	}
 	return res, nil
+}
+
+func (a *Adapter) TransactWriteItems(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error) {
+	items := make([]ddb.TransactWriteItem, 0, len(params.TransactItems))
+	for i, it := range params.TransactItems {
+		action, err := fromSDKTransactWriteItem(it)
+		if err != nil {
+			return nil, mapError(fmt.Errorf("%w: TransactItems[%d]: %v", ddb.ErrValidation, i, err))
+		}
+		items = append(items, action)
+	}
+
+	in := ddb.TransactWriteItemsInput{TransactItems: items}
+	if params.ClientRequestToken != nil {
+		in.ClientRequestToken = *params.ClientRequestToken
+		in.HasClientRequestToken = true
+	}
+	if _, err := a.client.TransactWriteItems(ctx, in); err != nil {
+		return nil, mapError(err)
+	}
+	return &dynamodb.TransactWriteItemsOutput{}, nil
+}
+
+func fromSDKTransactWriteItem(it types.TransactWriteItem) (ddb.TransactWriteItem, error) {
+	switch {
+	case it.Put != nil:
+		p := it.Put
+		cond, err := exprString(p.ConditionExpression, "ConditionExpression")
+		if err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		if err := rejectEmptySubMaps(p.ExpressionAttributeNames, p.ExpressionAttributeValues, cond); err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		item, err := FromSDKMap(p.Item)
+		if err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		values, err := exprValues(p.ExpressionAttributeValues)
+		if err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		return ddb.TransactWriteItem{Put: &ddb.TransactPut{
+			TableName:                           aws.ToString(p.TableName),
+			Item:                                item,
+			ConditionExpression:                 cond,
+			ExpressionAttributeNames:            p.ExpressionAttributeNames,
+			ExpressionAttributeValues:           values,
+			ReturnValuesOnConditionCheckFailure: string(p.ReturnValuesOnConditionCheckFailure),
+		}}, nil
+	case it.Update != nil:
+		u := it.Update
+		cond, err := exprString(u.ConditionExpression, "ConditionExpression")
+		if err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		upd, err := exprString(u.UpdateExpression, "UpdateExpression")
+		if err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		if err := rejectEmptySubMaps(u.ExpressionAttributeNames, u.ExpressionAttributeValues, cond, upd); err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		key, err := FromSDKMap(u.Key)
+		if err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		values, err := exprValues(u.ExpressionAttributeValues)
+		if err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		return ddb.TransactWriteItem{Update: &ddb.TransactUpdate{
+			TableName:                           aws.ToString(u.TableName),
+			Key:                                 key,
+			UpdateExpression:                    upd,
+			ConditionExpression:                 cond,
+			ExpressionAttributeNames:            u.ExpressionAttributeNames,
+			ExpressionAttributeValues:           values,
+			ReturnValuesOnConditionCheckFailure: string(u.ReturnValuesOnConditionCheckFailure),
+		}}, nil
+	case it.Delete != nil:
+		d := it.Delete
+		cond, err := exprString(d.ConditionExpression, "ConditionExpression")
+		if err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		if err := rejectEmptySubMaps(d.ExpressionAttributeNames, d.ExpressionAttributeValues, cond); err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		key, err := FromSDKMap(d.Key)
+		if err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		values, err := exprValues(d.ExpressionAttributeValues)
+		if err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		return ddb.TransactWriteItem{Delete: &ddb.TransactDelete{
+			TableName:                           aws.ToString(d.TableName),
+			Key:                                 key,
+			ConditionExpression:                 cond,
+			ExpressionAttributeNames:            d.ExpressionAttributeNames,
+			ExpressionAttributeValues:           values,
+			ReturnValuesOnConditionCheckFailure: string(d.ReturnValuesOnConditionCheckFailure),
+		}}, nil
+	case it.ConditionCheck != nil:
+		cc := it.ConditionCheck
+		cond, err := exprString(cc.ConditionExpression, "ConditionExpression")
+		if err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		if err := rejectEmptySubMaps(cc.ExpressionAttributeNames, cc.ExpressionAttributeValues, cond); err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		key, err := FromSDKMap(cc.Key)
+		if err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		values, err := exprValues(cc.ExpressionAttributeValues)
+		if err != nil {
+			return ddb.TransactWriteItem{}, err
+		}
+		return ddb.TransactWriteItem{ConditionCheck: &ddb.TransactConditionCheck{
+			TableName:                           aws.ToString(cc.TableName),
+			Key:                                 key,
+			ConditionExpression:                 cond,
+			ExpressionAttributeNames:            cc.ExpressionAttributeNames,
+			ExpressionAttributeValues:           values,
+			ReturnValuesOnConditionCheckFailure: string(cc.ReturnValuesOnConditionCheckFailure),
+		}}, nil
+	default:
+		return ddb.TransactWriteItem{}, fmt.Errorf("must set exactly one action")
+	}
 }

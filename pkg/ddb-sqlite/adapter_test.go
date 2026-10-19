@@ -1302,3 +1302,154 @@ func TestAdapterTransactGetMissingTable(t *testing.T) {
 		t.Fatalf("err = %v, want ResourceNotFoundException", err)
 	}
 }
+
+func txSDKPut(table, pk string) types.TransactWriteItem {
+	return types.TransactWriteItem{Put: &types.Put{
+		TableName: aws.String(table),
+		Item:      map[string]types.AttributeValue{"pk": strVal(pk)},
+	}}
+}
+
+func TestAdapterTransactWritePut(t *testing.T) {
+	a := adapterClient(t)
+	ctx := context.Background()
+	mustCreate(t, a, ctx, "TxW")
+	_, err := a.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+		txSDKPut("TxW", "a"),
+		txSDKPut("TxW", "b"),
+	}})
+	if err != nil {
+		t.Fatalf("TransactWriteItems: %v", err)
+	}
+	for _, pk := range []string{"a", "b"} {
+		out, err := a.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("TxW"), Key: map[string]types.AttributeValue{"pk": strVal(pk)}})
+		if err != nil || len(out.Item) == 0 {
+			t.Errorf("GetItem %q: item=%v err=%v", pk, out.Item, err)
+		}
+	}
+}
+
+func TestAdapterTransactWriteCanceled(t *testing.T) {
+	a := adapterClient(t)
+	ctx := context.Background()
+	mustCreate(t, a, ctx, "TxW")
+	putConf(t, a, ctx, "TxW", map[string]types.AttributeValue{"pk": strVal("a"), "v": strVal("orig")})
+	_, err := a.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+		Put: &types.Put{
+			TableName:                           aws.String("TxW"),
+			Item:                                map[string]types.AttributeValue{"pk": strVal("a"), "v": strVal("new")},
+			ConditionExpression:                 aws.String("attribute_not_exists(pk)"),
+			ReturnValuesOnConditionCheckFailure: types.ReturnValuesOnConditionCheckFailureAllOld,
+		},
+	}}})
+	var tce *types.TransactionCanceledException
+	if !errors.As(err, &tce) {
+		t.Fatalf("err = %v, want TransactionCanceledException", err)
+	}
+	if len(tce.CancellationReasons) != 1 || aws.ToString(tce.CancellationReasons[0].Code) != "ConditionalCheckFailed" {
+		t.Fatalf("reasons = %#v", tce.CancellationReasons)
+	}
+	if got := tce.CancellationReasons[0].Item["v"].(*types.AttributeValueMemberS).Value; got != "orig" {
+		t.Errorf("ALL_OLD item v = %q, want orig", got)
+	}
+}
+
+func TestAdapterTransactWriteTokenMismatch(t *testing.T) {
+	a := adapterClient(t)
+	ctx := context.Background()
+	mustCreate(t, a, ctx, "TxW")
+	if _, err := a.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+		ClientRequestToken: aws.String("tok"),
+		TransactItems:      []types.TransactWriteItem{txSDKPut("TxW", "a")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := a.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+		ClientRequestToken: aws.String("tok"),
+		TransactItems:      []types.TransactWriteItem{txSDKPut("TxW", "b")},
+	})
+	var mismatch *types.IdempotentParameterMismatchException
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("err = %v, want IdempotentParameterMismatchException", err)
+	}
+}
+
+func TestAdapterTransactWriteTokenEmpty(t *testing.T) {
+	a := adapterClient(t)
+	ctx := context.Background()
+	mustCreate(t, a, ctx, "TxW")
+	if _, err := a.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+		ClientRequestToken: aws.String(""),
+		TransactItems:      []types.TransactWriteItem{txSDKPut("TxW", "a")},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := a.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+		ClientRequestToken: aws.String(""),
+		TransactItems:      []types.TransactWriteItem{txSDKPut("TxW", "b")},
+	})
+	var mismatch *types.IdempotentParameterMismatchException
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("err = %v, want IdempotentParameterMismatchException", err)
+	}
+}
+
+func TestAdapterTransactWriteValidation(t *testing.T) {
+	a := adapterClient(t)
+	ctx := context.Background()
+	mustCreate(t, a, ctx, "TxW")
+	_, err := a.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{txSDKPut("Nope", "a")}})
+	var rnfe *types.ResourceNotFoundException
+	if !errors.As(err, &rnfe) {
+		t.Fatalf("missing table: err = %v, want ResourceNotFoundException", err)
+	}
+	items := make([]types.TransactWriteItem, 0, 101)
+	for i := range 101 {
+		items = append(items, txSDKPut("TxW", fmt.Sprintf("k%03d", i)))
+	}
+	_, err = a.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: items})
+	asValidation(t, err, "101 items")
+}
+
+func TestAdapterTransactWriteAllActions(t *testing.T) {
+	a := adapterClient(t)
+	ctx := context.Background()
+	mustCreate(t, a, ctx, "TxW")
+	putConf(t, a, ctx, "TxW", map[string]types.AttributeValue{"pk": strVal("c")})
+	putConf(t, a, ctx, "TxW", map[string]types.AttributeValue{"pk": strVal("d")})
+	_, err := a.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+		txSDKPut("TxW", "a"),
+		{Update: &types.Update{
+			TableName:                 aws.String("TxW"),
+			Key:                       map[string]types.AttributeValue{"pk": strVal("b")},
+			UpdateExpression:          aws.String("SET v = :v"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{":v": strVal("set")},
+		}},
+		{ConditionCheck: &types.ConditionCheck{
+			TableName:           aws.String("TxW"),
+			Key:                 map[string]types.AttributeValue{"pk": strVal("c")},
+			ConditionExpression: aws.String("attribute_exists(pk)"),
+		}},
+		{Delete: &types.Delete{
+			TableName: aws.String("TxW"),
+			Key:       map[string]types.AttributeValue{"pk": strVal("d")},
+		}},
+	}})
+	if err != nil {
+		t.Fatalf("TransactWriteItems: %v", err)
+	}
+	out, err := a.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("TxW"), Key: map[string]types.AttributeValue{"pk": strVal("b")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := out.Item["v"].(*types.AttributeValueMemberS).Value; got != "set" {
+		t.Errorf("v = %q, want set", got)
+	}
+	deleted, err := a.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("TxW"), Key: map[string]types.AttributeValue{"pk": strVal("d")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deleted.Item) != 0 {
+		t.Errorf("d still present: %#v", deleted.Item)
+	}
+}
