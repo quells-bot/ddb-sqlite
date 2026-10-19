@@ -41,6 +41,7 @@ type api interface {
 	BatchWriteItem(ctx context.Context, params *dynamodb.BatchWriteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchWriteItemOutput, error)
 	BatchGetItem(ctx context.Context, params *dynamodb.BatchGetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.BatchGetItemOutput, error)
 	TransactGetItems(ctx context.Context, params *dynamodb.TransactGetItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactGetItemsOutput, error)
+	TransactWriteItems(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error)
 	UpdateTimeToLive(ctx context.Context, params *dynamodb.UpdateTimeToLiveInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateTimeToLiveOutput, error)
 	DescribeTimeToLive(ctx context.Context, params *dynamodb.DescribeTimeToLiveInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DescribeTimeToLiveOutput, error)
 }
@@ -7595,5 +7596,253 @@ func TestConfTransactGetResponseTooLarge(t *testing.T) {
 		}
 		_, err := c.TransactGetItems(ctx, &dynamodb.TransactGetItemsInput{TransactItems: items})
 		asValidation(t, err, "response too large")
+	})
+}
+
+func txPutSDK(table, pk string) types.TransactWriteItem {
+	return types.TransactWriteItem{Put: &types.Put{
+		TableName: aws.String(table),
+		Item:      map[string]types.AttributeValue{"pk": strVal(pk)},
+	}}
+}
+
+func txConditionPut(table, pk, cond string) types.TransactWriteItem {
+	return types.TransactWriteItem{Put: &types.Put{
+		TableName:           aws.String(table),
+		Item:                map[string]types.AttributeValue{"pk": strVal(pk)},
+		ConditionExpression: aws.String(cond),
+	}}
+}
+
+func mustCanceled(t *testing.T, err error) *types.TransactionCanceledException {
+	t.Helper()
+	var tce *types.TransactionCanceledException
+	if !errors.As(err, &tce) {
+		t.Fatalf("err = %v, want TransactionCanceledException", err)
+	}
+	return tce
+}
+
+func TestConfTransactWriteAtomic(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		if _, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			txPutSDK("TxW", "a"), txPutSDK("TxW", "b"),
+		}}); err != nil {
+			t.Fatalf("TransactWriteItems: %v", err)
+		}
+		for _, pk := range []string{"a", "b"} {
+			out, err := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("TxW"), Key: map[string]types.AttributeValue{"pk": strVal(pk)}})
+			if err != nil || len(out.Item) == 0 {
+				t.Errorf("GetItem %q: item=%v err=%v", pk, out.Item, err)
+			}
+		}
+	})
+}
+
+func TestConfTransactWriteRollback(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			txPutSDK("TxW", "a"),
+			txConditionPut("TxW", "b", "attribute_exists(pk)"),
+		}})
+		mustCanceled(t, err)
+		out, err := c.GetItem(ctx, &dynamodb.GetItemInput{TableName: aws.String("TxW"), Key: map[string]types.AttributeValue{"pk": strVal("a")}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out.Item) != 0 {
+			t.Errorf("rolled-back item present: %#v", out.Item)
+		}
+	})
+}
+
+func TestConfTransactWriteCancellationReasons(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		putConf(t, c, ctx, "TxW", map[string]types.AttributeValue{"pk": strVal("c1")})
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			txConditionPut("TxW", "c1", "attribute_not_exists(pk)"),
+			txPutSDK("TxW", "c2"),
+			txConditionPut("TxW", "c3", "attribute_exists(pk)"),
+		}})
+		tce := mustCanceled(t, err)
+		want := []string{"ConditionalCheckFailed", "None", "ConditionalCheckFailed"}
+		if len(tce.CancellationReasons) != len(want) {
+			t.Fatalf("reasons = %d, want %d", len(tce.CancellationReasons), len(want))
+		}
+		for i, code := range want {
+			if got := aws.ToString(tce.CancellationReasons[i].Code); got != code {
+				t.Errorf("reason[%d].Code = %q, want %q", i, got, code)
+			}
+		}
+	})
+}
+
+func TestConfTransactWriteAllOld(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		putConf(t, c, ctx, "TxW", map[string]types.AttributeValue{"pk": strVal("a"), "v": strVal("orig")})
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+			Put: &types.Put{
+				TableName:                           aws.String("TxW"),
+				Item:                                map[string]types.AttributeValue{"pk": strVal("a"), "v": strVal("new")},
+				ConditionExpression:                 aws.String("attribute_not_exists(pk)"),
+				ReturnValuesOnConditionCheckFailure: types.ReturnValuesOnConditionCheckFailureAllOld,
+			},
+		}}})
+		tce := mustCanceled(t, err)
+		if got := aws.ToString(tce.CancellationReasons[0].Code); got != "ConditionalCheckFailed" {
+			t.Fatalf("code = %q", got)
+		}
+		if got := tce.CancellationReasons[0].Item["v"].(*types.AttributeValueMemberS).Value; got != "orig" {
+			t.Errorf("ALL_OLD v = %q, want orig", got)
+		}
+	})
+}
+
+func TestConfTransactWriteConditionCheck(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		putConf(t, c, ctx, "TxW", map[string]types.AttributeValue{"pk": strVal("a")})
+		if _, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+			ConditionCheck: &types.ConditionCheck{
+				TableName:           aws.String("TxW"),
+				Key:                 map[string]types.AttributeValue{"pk": strVal("a")},
+				ConditionExpression: aws.String("attribute_exists(pk)"),
+			},
+		}}}); err != nil {
+			t.Fatalf("passing check: %v", err)
+		}
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+			ConditionCheck: &types.ConditionCheck{
+				TableName:           aws.String("TxW"),
+				Key:                 map[string]types.AttributeValue{"pk": strVal("a")},
+				ConditionExpression: aws.String("attribute_not_exists(pk)"),
+			},
+		}}})
+		tce := mustCanceled(t, err)
+		if got := aws.ToString(tce.CancellationReasons[0].Code); got != "ConditionalCheckFailed" {
+			t.Errorf("code = %q", got)
+		}
+		if msg := aws.ToString(tce.CancellationReasons[0].Message); !strings.HasSuffix(msg, ".") {
+			t.Errorf("message = %q, want trailing period", msg)
+		}
+	})
+}
+
+func TestConfTransactWriteDuplicate(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			txPutSDK("TxW", "a"), txPutSDK("TxW", "a"),
+		}})
+		asValidation(t, err, "duplicate item")
+	})
+}
+
+func TestConfTransactWriteDuplicateVsCondition(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		putConf(t, c, ctx, "TxW", map[string]types.AttributeValue{"pk": strVal("a")})
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			txConditionPut("TxW", "a", "attribute_not_exists(pk)"),
+			txPutSDK("TxW", "a"),
+		}})
+		mustCanceled(t, err)
+	})
+}
+
+func TestConfTransactWriteLimits(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		items := func(n int) []types.TransactWriteItem {
+			out := make([]types.TransactWriteItem, 0, n)
+			for i := range n {
+				out = append(out, txPutSDK("TxW", fmt.Sprintf("k%03d", i)))
+			}
+			return out
+		}
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: items(101)})
+		asValidation(t, err, "101 items")
+		if _, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: items(100)}); err != nil {
+			t.Errorf("100 items: %v", err)
+		}
+	})
+}
+
+func TestConfTransactWriteItemSize(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+			Put: &types.Put{
+				TableName: aws.String("TxW"),
+				Item: map[string]types.AttributeValue{
+					"pk":   strVal("a"),
+					"blob": strVal(strings.Repeat("x", 400*1024)),
+				},
+			},
+		}}})
+		asValidation(t, err, "item size")
+	})
+}
+
+func TestConfTransactWritePayloadSize(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		big := strings.Repeat("y", 350*1024)
+		items := func(n int) []types.TransactWriteItem {
+			out := make([]types.TransactWriteItem, 0, n)
+			for i := range n {
+				out = append(out, types.TransactWriteItem{Put: &types.Put{
+					TableName: aws.String("TxW"),
+					Item: map[string]types.AttributeValue{
+						"pk":   strVal(fmt.Sprintf("b%02d", i)),
+						"blob": strVal(big),
+					},
+				}})
+			}
+			return out
+		}
+		if _, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: items(11)}); err != nil {
+			t.Errorf("11 big items: %v", err)
+		}
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: items(12)})
+		asValidation(t, err, "payload size")
+	})
+}
+
+func TestConfTransactWriteMissingTable(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			txPutSDK("Nope", "a"),
+		}})
+		asResourceNotFound(t, err, "missing table")
+	})
+}
+
+func TestConfTransactWriteInvalidKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+			Put: &types.Put{
+				TableName: aws.String("TxW"),
+				Item:      map[string]types.AttributeValue{"v": strVal("no key")},
+			},
+		}}})
+		asValidation(t, err, "missing key")
 	})
 }
