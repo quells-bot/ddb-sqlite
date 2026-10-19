@@ -7846,3 +7846,166 @@ func TestConfTransactWriteInvalidKey(t *testing.T) {
 		asValidation(t, err, "missing key")
 	})
 }
+
+func TestConfTransactWriteGSIMaintenance(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "TxG")
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+			Put: &types.Put{
+				TableName: aws.String("TxG"),
+				Item: map[string]types.AttributeValue{
+					"pk": strVal("A"), "sk": strVal("a"),
+					"gsi_pk": strVal("G1"), "gsi_sk": strVal("s1"),
+				},
+			},
+		}}})
+		if err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		count := func() int32 {
+			out, err := c.Query(ctx, &dynamodb.QueryInput{
+				TableName:                 aws.String("TxG"),
+				IndexName:                 aws.String("gsi-all"),
+				KeyConditionExpression:    aws.String("gsi_pk = :g"),
+				ExpressionAttributeValues: map[string]types.AttributeValue{":g": strVal("G1")},
+			})
+			if err != nil {
+				t.Fatalf("Query: %v", err)
+			}
+			return out.Count
+		}
+		if got := count(); got != 1 {
+			t.Fatalf("gsi count = %d, want 1", got)
+		}
+		_, err = c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+			Update: &types.Update{
+				TableName:        aws.String("TxG"),
+				Key:              map[string]types.AttributeValue{"pk": strVal("A"), "sk": strVal("a")},
+				UpdateExpression: aws.String("REMOVE gsi_pk"),
+			},
+		}}})
+		if err != nil {
+			t.Fatalf("update: %v", err)
+		}
+		if got := count(); got != 0 {
+			t.Fatalf("gsi count after remove = %d, want 0", got)
+		}
+	})
+}
+
+func TestConfTransactWriteGSITypeMismatch(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "TxG")
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+			Put: &types.Put{
+				TableName: aws.String("TxG"),
+				Item: map[string]types.AttributeValue{
+					"pk": strVal("A"), "sk": strVal("a"),
+					"gsi_pk": &types.AttributeValueMemberN{Value: "7"},
+				},
+			},
+		}}})
+		tce := mustCanceled(t, err)
+		if len(tce.CancellationReasons) != 1 || aws.ToString(tce.CancellationReasons[0].Code) != "ValidationError" {
+			t.Fatalf("reasons = %#v", tce.CancellationReasons)
+		}
+	})
+}
+
+func TestConfTransactWriteGSIEmptyKeyValue(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreateGsiTable(t, c, ctx, "TxG")
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+			Put: &types.Put{
+				TableName: aws.String("TxG"),
+				Item: map[string]types.AttributeValue{
+					"pk": strVal("A"), "sk": strVal("a"),
+					"gsi_pk": strVal(""),
+				},
+			},
+		}}})
+		asValidation(t, err, "empty gsi key")
+	})
+}
+
+func TestConfTransactWriteUpdateKeyAttribute(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		putConf(t, c, ctx, "TxW", map[string]types.AttributeValue{"pk": strVal("a")})
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{{
+			Update: &types.Update{
+				TableName:                 aws.String("TxW"),
+				Key:                       map[string]types.AttributeValue{"pk": strVal("a")},
+				UpdateExpression:          aws.String("SET pk = :p"),
+				ExpressionAttributeValues: map[string]types.AttributeValue{":p": strVal("zzz")},
+			},
+		}}})
+		tce := mustCanceled(t, err)
+		if len(tce.CancellationReasons) != 1 || aws.ToString(tce.CancellationReasons[0].Code) != "ValidationError" {
+			t.Fatalf("reasons = %#v", tce.CancellationReasons)
+		}
+	})
+}
+
+func TestConfTransactWriteToken(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		first := &dynamodb.TransactWriteItemsInput{
+			ClientRequestToken: aws.String("tok"),
+			TransactItems:      []types.TransactWriteItem{txPutSDK("TxW", "a")},
+		}
+		if _, err := c.TransactWriteItems(ctx, first); err != nil {
+			t.Fatalf("first: %v", err)
+		}
+		if _, err := c.TransactWriteItems(ctx, first); err != nil {
+			t.Fatalf("replay: %v", err)
+		}
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+			ClientRequestToken: aws.String("tok"),
+			TransactItems:      []types.TransactWriteItem{txPutSDK("TxW", "b")},
+		})
+		var mismatch *types.IdempotentParameterMismatchException
+		if !errors.As(err, &mismatch) {
+			t.Fatalf("mismatch: err = %v, want IdempotentParameterMismatchException", err)
+		}
+	})
+}
+
+func TestConfTransactWriteTokenEmpty(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxW")
+		if _, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+			ClientRequestToken: aws.String(""),
+			TransactItems:      []types.TransactWriteItem{txPutSDK("TxW", "a")},
+		}); err != nil {
+			t.Fatalf("first: %v", err)
+		}
+		_, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
+			ClientRequestToken: aws.String(""),
+			TransactItems:      []types.TransactWriteItem{txPutSDK("TxW", "b")},
+		})
+		var mismatch *types.IdempotentParameterMismatchException
+		if !errors.As(err, &mismatch) {
+			t.Fatalf("err = %v, want IdempotentParameterMismatchException", err)
+		}
+	})
+}
+
+func TestConfTransactWriteCrossTableSameKey(t *testing.T) {
+	runConformance(t, func(t *testing.T, c api) {
+		ctx := context.Background()
+		mustCreate(t, c, ctx, "TxA")
+		mustCreate(t, c, ctx, "TxB")
+		if _, err := c.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+			txPutSDK("TxA", "k"), txPutSDK("TxB", "k"),
+		}}); err != nil {
+			t.Fatalf("cross-table same key: %v", err)
+		}
+	})
+}
